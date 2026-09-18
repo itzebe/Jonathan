@@ -79,11 +79,30 @@ export async function POST(request: Request) {
       });
     }
 
+    if (body?.action === 'parse-strategy') {
+      const normalizedPrompt = prompt.toLowerCase();
+      return NextResponse.json({
+        status: 'success',
+        success: true,
+        targetToken: normalizedPrompt.includes('ai') ? 'bNVDA' : 'bTSLA',
+        hedgeAsset: normalizedPrompt.includes('yield') || normalizedPrompt.includes('ondo') ? 'Ondo USDY' : 'BNB',
+        action: normalizedPrompt.includes('dca') ? 'dca' : normalizedPrompt.includes('sell') ? 'sell' : 'buy',
+      });
+    }
+
     if (body?.action === 'quote') {
       const usdAmount = parseUsdAmount(prompt);
       const bnbUsdPrice = await getBnbUsdPrice();
       const requiredBnb = usdAmount / bnbUsdPrice;
-      return NextResponse.json({ usdAmount, bnbUsdPrice, requiredBnb, gasBufferBnb: 0.00015 });
+      return NextResponse.json({
+        status: 'success',
+        requiredBnb: requiredBnb.toFixed(18),
+        usdAmount,
+        targetRouter: PANCAKESWAP_V3_ROUTER,
+        bnbUsdPrice,
+        gasBufferBnb: '0.00015',
+        transaction: null,
+      });
     }
 
     if (isDryRun) {
