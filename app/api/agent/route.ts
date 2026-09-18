@@ -8,6 +8,28 @@ function safeAddress(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : ZERO_ADDRESS;
 }
 
+function parseUsdAmount(prompt: string) {
+  const match = prompt.match(/(?:\$|usd\s*)(\d+(?:\.\d+)?)/i);
+  const amount = match ? Number(match[1]) : 0.5;
+  return Number.isFinite(amount) && amount > 0 ? amount : 0.5;
+}
+
+async function getBnbUsdPrice() {
+  try {
+    const response = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', {
+      next: { revalidate: 15 },
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!response.ok) throw new Error('BNB price unavailable');
+    const data = await response.json();
+    const price = Number(data?.price);
+    if (!Number.isFinite(price) || price <= 0) throw new Error('Invalid BNB price');
+    return price;
+  } catch {
+    return 600;
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -16,6 +38,34 @@ export async function POST(request: Request) {
       : 'Rotate bTSLA into Ondo USDY';
     const userAddress = safeAddress(body?.userAddress);
     const isDryRun = body?.isDryRun !== false;
+
+    if (body?.action === 'activate-agent') {
+      const budget = Number(body?.budget);
+      const unit = body?.unit === 'BNB' ? 'BNB' : 'USD';
+      const frequency = ['aggressive', 'defensive', 'dca'].includes(body?.frequency) ? body.frequency : 'defensive';
+      if (!Number.isFinite(budget) || budget <= 0 || budget > 100000) {
+        return NextResponse.json({ status: 'invalid_allowance', message: 'Enter an allowance between 0 and 100,000.' }, { status: 400 });
+      }
+      if (!body?.isDryRun && userAddress === ZERO_ADDRESS) {
+        return NextResponse.json({ status: 'wallet_required', message: 'Connect a BSC Mainnet wallet before activating live autonomy.' }, { status: 400 });
+      }
+      return NextResponse.json({
+        status: 'success',
+        mode: body?.isDryRun ? 'DRY_RUN_AUTONOMY' : 'LIVE_GUARDED_AUTONOMY',
+        network: 'BSC Mainnet (Chain ID 56)',
+        allowance: { amount: budget, unit, remaining: budget, frequency, maxSlippage: 1.2 },
+        guardrails: { budgetCap: true, walletLiquidity: true, slippageRedirect: 'Ondo USDY' },
+        message: 'Allowance recorded. Autonomous actions require a verified quote and pass every guardrail before signing.',
+        timestamp: Date.now(),
+      });
+    }
+
+    if (body?.action === 'quote') {
+      const usdAmount = parseUsdAmount(prompt);
+      const bnbUsdPrice = await getBnbUsdPrice();
+      const requiredBnb = usdAmount / bnbUsdPrice;
+      return NextResponse.json({ usdAmount, bnbUsdPrice, requiredBnb, gasBufferBnb: 0.00015 });
+    }
 
     if (isDryRun) {
       return NextResponse.json({

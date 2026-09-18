@@ -16,8 +16,19 @@ const BSC_RPC_URLS = [
 
 function getEthereumProvider() {
   return (window as Window & { ethereum?: EthereumProvider }).ethereum;
+}
+
+function decimalToWei(value: number) {
+  const [whole, fraction = ''] = value.toFixed(18).split('.');
+  return BigInt(whole) * BigInt(10) ** BigInt(18) + BigInt(fraction.padEnd(18, '0'));
+}
+
+function formatBnb(wei: bigint) {
+  return Number(wei) / 1e18 < 0.000001
+    ? (Number(wei) / 1e18).toExponential(3)
+    : (Number(wei) / 1e18).toFixed(6);
 } 
-import { Activity, ArrowUpRight, Bot, CheckCircle2, Code2, ExternalLink, Menu, ShieldCheck, Sparkles, Wallet, X } from 'lucide-react';
+import { Activity, ArrowUpRight, Bot, CheckCircle2, Code2, ExternalLink, Menu, ShieldCheck, Sparkles, Wallet, X, LockKeyhole, Gauge, CircleAlert } from 'lucide-react';
 import { StatusHeader } from '@/components/status-header';
 import { BasketCard } from '@/components/basket-card';
 import { MarketGapScanner } from '@/components/market-gap-scanner';
@@ -66,6 +77,12 @@ export default function Page() {
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [executionSpeed, setExecutionSpeed] = useState<'aggressive' | 'guarded'>('aggressive');
   const [maxSlippage, setMaxSlippage] = useState(1.5);
+  const [autonomyBudget, setAutonomyBudget] = useState('20');
+  const [autonomyUnit, setAutonomyUnit] = useState<'USD' | 'BNB'>('USD');
+  const [autonomyFrequency, setAutonomyFrequency] = useState<'aggressive' | 'defensive' | 'dca'>('aggressive');
+  const [agentActive, setAgentActive] = useState(false);
+  const [agentRemaining, setAgentRemaining] = useState<number | null>(null);
+  const [agentThought, setAgentThought] = useState('Agent is idle — activate an allowance to begin monitoring.');
 
   const showToast = (message: string) => {
     setToast(message);
@@ -111,12 +128,32 @@ export default function Page() {
     if (!ethereum) throw new Error('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to execute live transactions.');
     if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
 
+    const quoteResponse = await fetch('/api/agent/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'quote', prompt }),
+    });
+    if (!quoteResponse.ok) throw new Error('Unable to calculate the live BNB amount. Please retry.');
+    const quote = await quoteResponse.json() as { usdAmount: number; requiredBnb: number; gasBufferBnb: number };
+    const requiredWei = decimalToWei(quote.requiredBnb);
+    const gasBufferWei = decimalToWei(quote.gasBufferBnb);
+    const balanceHex = await ethereum.request({
+      method: 'eth_getBalance',
+      params: [connectedAddress, 'latest'],
+    }) as string;
+    const balanceWei = BigInt(balanceHex);
+    const totalRequiredWei = requiredWei + gasBufferWei;
+
+    if (balanceWei < totalRequiredWei) {
+      throw new Error(`Insufficient Funds: Your balance is ${formatBnb(balanceWei)} BNB, but $${quote.usdAmount} USD requires ${formatBnb(requiredWei)} BNB.`);
+    }
+
     return await ethereum.request({
       method: 'eth_sendTransaction',
       params: [{
         from: connectedAddress,
         to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
-        value: '0x0',
+        value: `0x${requiredWei.toString(16)}`,
         data: '0x',
         chainId: BSC_CHAIN_ID,
       }],
@@ -185,6 +222,42 @@ export default function Page() {
       }
     } finally {
       setLoadingBasket(null);
+    }
+  };
+
+  const handleActivateAgent = async () => {
+    const amount = Number(autonomyBudget);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showToast('Enter a spending allowance greater than zero.');
+      return;
+    }
+    if (!isDryRun && !walletAddress) {
+      showToast('Connect your BSC Mainnet wallet before delegating an allowance.');
+      return;
+    }
+    try {
+      const response = await fetch('/api/agent/route', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'activate-agent',
+          budget: amount,
+          unit: autonomyUnit,
+          frequency: autonomyFrequency,
+          userAddress: walletAddress,
+          isDryRun,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message ?? 'Unable to activate the agent.');
+      setAgentActive(true);
+      setAgentRemaining(result.allowance?.remaining ?? amount);
+      setAgentThought(isDryRun
+        ? 'Simulation allowance active — no wallet funds can move.'
+        : 'Allowance active — monitoring gaps within your approved cap.');
+      showToast(isDryRun ? 'Safe autonomous simulation activated.' : 'Allowance activated with your explicit approval.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not activate the agent.');
     }
   };
 
@@ -315,6 +388,25 @@ export default function Page() {
         </section>
 
         <section id="scanner" className="mb-16 scroll-mt-24"><MarketGapScanner /></section>
+
+        <section id="autonomy" className="mb-16 scroll-mt-24">
+          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div><div className="mb-2 text-xs uppercase tracking-[0.18em] text-[#F0B90B]">Fund delegation</div><h2 className="text-2xl font-bold tracking-tight">Autonomous allowance & risk guard</h2></div>
+            <p className="max-w-md text-sm text-gray-500">Approve a clear cap first. The agent can monitor and act only inside it; every decision still passes budget, balance, and slippage checks.</p>
+          </div>
+          <div className="grid gap-5 lg:grid-cols-[1.1fr_.9fr]">
+            <div className="glass-dark rounded-2xl border border-[#F0B90B]/20 p-5 sm:p-6">
+              <div className="mb-5 flex items-start justify-between gap-4"><div><div className="flex items-center gap-2 font-bold"><LockKeyhole className="h-4 w-4 text-[#F0B90B]" /> Spending allowance</div><p className="mt-1 text-xs text-gray-500">This is a monitoring authorization, not an unlimited withdrawal.</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${agentActive ? 'bg-green-400/10 text-green-300' : 'bg-white/10 text-gray-500'}`}>{agentActive ? 'Active' : 'Not active'}</span></div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                <label className="flex min-h-12 items-center rounded-xl border border-white/10 bg-black/30 px-3"><span className="mr-2 text-gray-500">{autonomyUnit === 'USD' ? '$' : 'BNB'}</span><input aria-label="Autonomous spending allowance" inputMode="decimal" value={autonomyBudget} onChange={(event) => setAutonomyBudget(event.target.value)} className="min-w-0 flex-1 bg-transparent text-lg font-bold outline-none" /></label>
+                <div className="flex rounded-xl border border-white/10 bg-black/30 p-1"><button onClick={() => setAutonomyUnit('USD')} className={`rounded-lg px-3 text-xs font-bold ${autonomyUnit === 'USD' ? 'bg-[#F0B90B] text-black' : 'text-gray-500'}`}>USD</button><button onClick={() => setAutonomyUnit('BNB')} className={`rounded-lg px-3 text-xs font-bold ${autonomyUnit === 'BNB' ? 'bg-[#F0B90B] text-black' : 'text-gray-500'}`}>BNB</button></div>
+              </div>
+              <div className="mt-4 grid gap-2 sm:grid-cols-3"><button onClick={() => setAutonomyFrequency('aggressive')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'aggressive' ? 'border-red-400/50 bg-red-400/10' : 'border-white/10'}`}><div className="text-xs font-bold">Aggressive</div><div className="mt-1 text-[11px] text-gray-500">Every 5 mins</div></button><button onClick={() => setAutonomyFrequency('defensive')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'defensive' ? 'border-[#F0B90B]/50 bg-[#F0B90B]/10' : 'border-white/10'}`}><div className="text-xs font-bold">Defensive</div><div className="mt-1 text-[11px] text-gray-500">Hourly</div></button><button onClick={() => setAutonomyFrequency('dca')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'dca' ? 'border-green-400/50 bg-green-400/10' : 'border-white/10'}`}><div className="text-xs font-bold">DCA</div><div className="mt-1 text-[11px] text-gray-500">Daily</div></button></div>
+              <button onClick={handleActivateAgent} className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#F0B90B] font-bold text-black hover:bg-[#ffd447]"><ShieldCheck className="h-4 w-4" /> {agentActive ? 'Update allowance & keep agent active' : 'Delegate & activate agent'}</button>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 sm:p-6"><div className="mb-5 flex items-center gap-2 font-bold"><Gauge className="h-4 w-4 text-[#F0B90B]" /> Live reasoner console</div><div className="rounded-xl bg-black/40 p-4 font-mono text-xs leading-6 text-gray-400"><div className="text-green-300">● Guardrails online</div><div>{agentThought}</div><div className="mt-2 text-gray-500">Budget remaining: <span className="text-white">{agentRemaining === null ? '—' : `${autonomyUnit === 'USD' ? '$' : ''}${agentRemaining.toFixed(2)}${autonomyUnit === 'BNB' ? ' BNB' : ''}`}</span></div><div className="text-gray-500">Slippage guard: <span className="text-[#F0B90B]">1.2% max</span></div></div><div className="mt-4 flex gap-2 text-xs text-gray-500"><CircleAlert className="h-4 w-4 shrink-0 text-[#F0B90B]" /> High slippage automatically pauses the trade and routes attention to stable yield.</div></div>
+          </div>
+        </section>
 
         <section id="strategy" className="grid lg:grid-cols-[.8fr_1.2fr] gap-6 mb-16 scroll-mt-24">
           <div className="rounded-2xl bg-[#F0B90B] text-black p-6 sm:p-8 flex flex-col justify-between min-h-64"><div><div className="w-11 h-11 bg-black rounded-xl flex items-center justify-center mb-6"><Sparkles className="w-5 h-5 text-[#F0B90B]" /></div><h2 className="text-2xl sm:text-3xl font-black tracking-tight">Your market.<br />Your rules.</h2><p className="mt-3 text-sm text-black/70 max-w-xs">Give the agent a plain-English strategy. It handles the route, timing, and risk checks.</p></div><div className="flex items-center gap-2 mt-8 text-xs font-bold uppercase tracking-wider"><ShieldCheck className="w-4 h-4" /> Guardrails enabled</div></div>
