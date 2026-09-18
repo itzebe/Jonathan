@@ -16,6 +16,17 @@ const BSC_RPC_URLS = [
 
 function getEthereumProvider() {
   return (window as Window & { ethereum?: EthereumProvider }).ethereum;
+}
+
+function decimalToWei(value: number) {
+  const [whole, fraction = ''] = value.toFixed(18).split('.');
+  return BigInt(whole) * BigInt(10) ** BigInt(18) + BigInt(fraction.padEnd(18, '0'));
+}
+
+function formatBnb(wei: bigint) {
+  return Number(wei) / 1e18 < 0.000001
+    ? (Number(wei) / 1e18).toExponential(3)
+    : (Number(wei) / 1e18).toFixed(6);
 } 
 import { Activity, ArrowUpRight, Bot, CheckCircle2, Code2, ExternalLink, Menu, ShieldCheck, Sparkles, Wallet, X } from 'lucide-react';
 import { StatusHeader } from '@/components/status-header';
@@ -111,12 +122,32 @@ export default function Page() {
     if (!ethereum) throw new Error('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to execute live transactions.');
     if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
 
+    const quoteResponse = await fetch('/api/agent/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'quote', prompt }),
+    });
+    if (!quoteResponse.ok) throw new Error('Unable to calculate the live BNB amount. Please retry.');
+    const quote = await quoteResponse.json() as { usdAmount: number; requiredBnb: number; gasBufferBnb: number };
+    const requiredWei = decimalToWei(quote.requiredBnb);
+    const gasBufferWei = decimalToWei(quote.gasBufferBnb);
+    const balanceHex = await ethereum.request({
+      method: 'eth_getBalance',
+      params: [connectedAddress, 'latest'],
+    }) as string;
+    const balanceWei = BigInt(balanceHex);
+    const totalRequiredWei = requiredWei + gasBufferWei;
+
+    if (balanceWei < totalRequiredWei) {
+      throw new Error(`Insufficient Funds: Your balance is ${formatBnb(balanceWei)} BNB, but $${quote.usdAmount} USD requires ${formatBnb(requiredWei)} BNB.`);
+    }
+
     return await ethereum.request({
       method: 'eth_sendTransaction',
       params: [{
         from: connectedAddress,
         to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
-        value: '0x0',
+        value: `0x${requiredWei.toString(16)}`,
         data: '0x',
         chainId: BSC_CHAIN_ID,
       }],

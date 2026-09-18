@@ -8,6 +8,28 @@ function safeAddress(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : ZERO_ADDRESS;
 }
 
+function parseUsdAmount(prompt: string) {
+  const match = prompt.match(/(?:\$|usd\s*)(\d+(?:\.\d+)?)/i);
+  const amount = match ? Number(match[1]) : 0.5;
+  return Number.isFinite(amount) && amount > 0 ? amount : 0.5;
+}
+
+async function getBnbUsdPrice() {
+  try {
+    const response = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', {
+      next: { revalidate: 15 },
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!response.ok) throw new Error('BNB price unavailable');
+    const data = await response.json();
+    const price = Number(data?.price);
+    if (!Number.isFinite(price) || price <= 0) throw new Error('Invalid BNB price');
+    return price;
+  } catch {
+    return 600;
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -16,6 +38,13 @@ export async function POST(request: Request) {
       : 'Rotate bTSLA into Ondo USDY';
     const userAddress = safeAddress(body?.userAddress);
     const isDryRun = body?.isDryRun !== false;
+
+    if (body?.action === 'quote') {
+      const usdAmount = parseUsdAmount(prompt);
+      const bnbUsdPrice = await getBnbUsdPrice();
+      const requiredBnb = usdAmount / bnbUsdPrice;
+      return NextResponse.json({ usdAmount, bnbUsdPrice, requiredBnb, gasBufferBnb: 0.00015 });
+    }
 
     if (isDryRun) {
       return NextResponse.json({
