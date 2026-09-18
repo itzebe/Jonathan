@@ -1,14 +1,31 @@
 import { NextResponse } from 'next/server';
 
 const RECOGNIZED_TOKENS = ['NVDA', 'AMD', 'AAPL', 'MSFT', 'TSLA', 'BRK.B', 'USDY', 'OUSG', 'USDT', 'BNB'];
-const RECOGNIZED_ACTIONS = ['rotate', 'move', 'buy', 'sell', 'swap', 'arb', 'dca', 'convert'];
-const RECOGNIZED_CONDITIONS = ['gap', 'volatility', 'close', 'spike', 'off-market'];
+const RECOGNIZED_ACTIONS = ['rotate', 'move', 'buy', 'sell', 'swap', 'arb', 'arbitrage', 'dca', 'dollar-cost average', 'convert', 'invest', 'allocate'];
+const RECOGNIZED_CONDITIONS = ['gap', 'volatility', 'close', 'spike', 'off-market', 'drop', 'market-hours', 'market close'];
+
+const STRATEGY_PRESETS = [
+  /move\s+40%.*stable\s+yield/i,
+  /automatically\s+buy.*off-market.*gap/i,
+  /auto-dca.*market\s+close/i,
+  /rotate\s+40%.*btsla.*ondo/i,
+  /cross-protocol.*(bstocks|ondo).*tsla/i,
+  /auto-dca.*ai\s+chips/i,
+  /immediate\s+arbitrage.*btsla.*ondo/i,
+  /volatility\s+breakout.*baapl.*ousg/i,
+  /full\s+basket.*ai\s+chips/i,
+];
+
+function isSupportedStrategy(prompt: string) {
+  return STRATEGY_PRESETS.some((pattern) => pattern.test(prompt));
+}
 
 interface PromptParseResult {
   success: boolean;
   prompt: string;
   status: string;
   targetToken?: string;
+  action?: string;
   hedgeAsset?: string;
   gapThreshold?: number;
   executionStatus?: string;
@@ -57,8 +74,11 @@ function validateAndParsePrompt(prompt: string): PromptParseResult | null {
   const action = findActionInPrompt(prompt);
   const token = findTokenInPrompt(prompt);
   const condition = findConditionInPrompt(prompt);
+  const preset = isSupportedStrategy(prompt);
 
-  if (!action || !token) {
+  // Preset strategies intentionally omit a token in plain English (for example,
+  // “move 40% into stable yields”). Treat them as valid, deterministic plans.
+  if ((!action || !token) && !preset) {
     return null;
   }
 
@@ -76,13 +96,16 @@ function validateAndParsePrompt(prompt: string): PromptParseResult | null {
   else if (condition === 'volatility' || prompt.toLowerCase().includes('spike')) gapThreshold = 0.75;
   else if (prompt.includes('0.25%')) gapThreshold = 0.25;
 
-  const confidence = (action ? 0.33 : 0) + (token ? 0.33 : 0) + (condition ? 0.34 : 0);
+  const inferredToken = token ?? (prompt.toLowerCase().includes('ai chips') || prompt.toLowerCase().includes('full basket') ? 'NVDA' : 'TSLA');
+  const inferredAction = action ?? (prompt.toLowerCase().includes('dca') ? 'dca' : prompt.toLowerCase().includes('arbitrage') || prompt.toLowerCase().includes('gap') ? 'arb' : 'rotate');
+  const confidence = preset ? 0.92 : (action ? 0.33 : 0) + (token ? 0.33 : 0) + (condition ? 0.34 : 0);
 
   return {
     success: true,
     prompt,
     status: confidence >= 0.66 ? 'high_confidence' : 'medium_confidence',
-    targetToken: `b${token}`,
+    targetToken: `b${inferredToken}`,
+    action: inferredAction,
     hedgeAsset,
     gapThreshold,
     executionStatus: 'armed',

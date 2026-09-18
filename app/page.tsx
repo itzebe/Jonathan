@@ -170,19 +170,44 @@ export default function Page() {
   const handleStrategy = async (prompt: string) => {
     setStrategyLoading(true);
     setStrategyStatus(1);
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    setStrategyStatus(2);
     try {
-      const response = await fetch('/api/agent/route', {
+      const parseResponse = await fetch('/api/agent/parse-prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, userAddress: walletAddress, isDryRun }),
+        body: JSON.stringify({ prompt }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? 'Strategy failed');
-      showToast(`Strategy parsed: ${data.targetToken} → ${data.hedgeAsset} at ${data.gapThreshold}% gap`);
-    } catch {
-      showToast('Could not parse strategy. Please try again.');
+      const parsed = await parseResponse.json();
+      if (!parseResponse.ok || parsed.success !== true) {
+        throw new Error(parsed.suggestion ?? parsed.suggestions?.[0] ?? 'Could not parse strategy');
+      }
+
+      setStrategyStatus(2);
+      const executionResponse = await fetch('/api/agent/execute-basket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          basketId: parsed.targetToken === 'bNVDA' ? 'AI & Semiconductors' : parsed.targetToken === 'bTSLA' ? 'Magnificent 7 Tech' : 'Defensive Yield',
+          userAddress: walletAddress,
+          isDryRun,
+          chainId: 56,
+        }),
+      });
+      const result = await executionResponse.json();
+      if (!executionResponse.ok) {
+        if (result.status === 'live_execution_unavailable') {
+          throw new Error('Live execution is unavailable until a verified quote endpoint returns unsigned calldata. No signature was requested.');
+        }
+        throw new Error(result.error ?? 'Strategy execution failed');
+      }
+
+      setStrategyStatus(3);
+      setReceipt(result);
+      showToast(isDryRun
+        ? `Simulation ready: ${parsed.targetToken} → ${parsed.hedgeAsset}. No gas spent.`
+        : 'Verified transaction payload ready for wallet signing.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not execute strategy. Please try again.');
     } finally {
       setStrategyLoading(false);
       setTimeout(() => setStrategyStatus(0), 2500);
