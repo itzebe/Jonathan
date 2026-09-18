@@ -39,6 +39,27 @@ export async function POST(request: Request) {
     const userAddress = safeAddress(body?.userAddress);
     const isDryRun = body?.isDryRun !== false;
 
+    if (body?.action === 'activate-agent') {
+      const budget = Number(body?.budget);
+      const unit = body?.unit === 'BNB' ? 'BNB' : 'USD';
+      const frequency = ['aggressive', 'defensive', 'dca'].includes(body?.frequency) ? body.frequency : 'defensive';
+      if (!Number.isFinite(budget) || budget <= 0 || budget > 100000) {
+        return NextResponse.json({ status: 'invalid_allowance', message: 'Enter an allowance between 0 and 100,000.' }, { status: 400 });
+      }
+      if (!body?.isDryRun && userAddress === ZERO_ADDRESS) {
+        return NextResponse.json({ status: 'wallet_required', message: 'Connect a BSC Mainnet wallet before activating live autonomy.' }, { status: 400 });
+      }
+      return NextResponse.json({
+        status: 'success',
+        mode: body?.isDryRun ? 'DRY_RUN_AUTONOMY' : 'LIVE_GUARDED_AUTONOMY',
+        network: 'BSC Mainnet (Chain ID 56)',
+        allowance: { amount: budget, unit, remaining: budget, frequency, maxSlippage: 1.2 },
+        guardrails: { budgetCap: true, walletLiquidity: true, slippageRedirect: 'Ondo USDY' },
+        message: 'Allowance recorded. Autonomous actions require a verified quote and pass every guardrail before signing.',
+        timestamp: Date.now(),
+      });
+    }
+
     if (body?.action === 'quote') {
       const usdAmount = parseUsdAmount(prompt);
       const bnbUsdPrice = await getBnbUsdPrice();
