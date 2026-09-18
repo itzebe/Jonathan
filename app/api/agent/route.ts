@@ -53,6 +53,47 @@ async function getBnbUsdPrice() {
   }
 }
 
+async function getBinanceWeb3MinimumOutput({
+  tokenOut,
+  amountIn,
+  userWalletAddress,
+}: {
+  tokenOut: `0x${string}`;
+  amountIn: bigint;
+  userWalletAddress: `0x${string}`;
+}) {
+  const params = new URLSearchParams({
+    binanceChainId: String(BSC_CHAIN_ID),
+    fromTokenAddress: WBNB_ADDRESS,
+    toTokenAddress: tokenOut,
+    amount: amountIn.toString(),
+    userWalletAddress,
+  });
+
+  try {
+    const response = await fetch(`https://web3.binance.com/api/v1/dex/aggregator/quote?${params.toString()}`, {
+      signal: AbortSignal.timeout(3000),
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!response.ok || !contentType.includes('application/json')) throw new Error('Binance Web3 quote unavailable');
+    const payload = await response.json() as { data?: { toTokenMinAmount?: string | number }; toTokenMinAmount?: string | number };
+    const rawMinimum = payload.data?.toTokenMinAmount ?? payload.toTokenMinAmount;
+    if (rawMinimum === undefined || rawMinimum === null || !/^\\d+(?:\\.\\d+)?$/.test(String(rawMinimum))) {
+      throw new Error('Binance Web3 quote returned no minimum output');
+    }
+    return { amountOutMinimum: BigInt(String(rawMinimum)), source: 'binance-web3' as const };
+  } catch {
+    // The token decimals are not available from the fallback input, so retain a
+    // conservative 0.5% bound in the amount domain supplied by the quote request.
+    return {
+      amountOutMinimum: (amountIn * 995n) / 1000n,
+      source: 'fallback-0.5-percent' as const,
+    };
+  }
+}
+
 function requestId() {
   return crypto.randomUUID();
 }
@@ -129,6 +170,11 @@ export async function POST(request: Request) {
           ? BSC_TOKENS.baapl
           : BSC_TOKENS.btsla;
       const recipient = /^0x[a-fA-F0-9]{40}$/.test(userAddress) ? userAddress as `0x${string}` : ZERO_ADDRESS as `0x${string}`;
+      const minimumOutput = await getBinanceWeb3MinimumOutput({
+        tokenOut: selectedToken,
+        amountIn,
+        userWalletAddress: recipient,
+      });
       const calldata = encodeFunctionData({
         abi: PANCAKE_V3_ABI,
         functionName: 'exactInputSingle',
@@ -138,7 +184,7 @@ export async function POST(request: Request) {
           fee: 3000,
           recipient,
           amountIn,
-          amountOutMinimum: 0n,
+          amountOutMinimum: minimumOutput.amountOutMinimum,
           sqrtPriceLimitX96: 0n,
         }],
       });
@@ -156,6 +202,8 @@ export async function POST(request: Request) {
         usdAmount,
         targetRouter: PANCAKESWAP_V3_ROUTER,
         calldata,
+        amountOutMinimum: minimumOutput.amountOutMinimum.toString(),
+        quoteSource: minimumOutput.source,
         bnbUsdPrice: priceResult.price,
         isFallbackPrice: priceResult.isFallbackPrice,
         calculatedSlippage,
