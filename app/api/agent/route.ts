@@ -1,14 +1,21 @@
 import { NextResponse } from 'next/server';
 import { encodeFunctionData } from 'viem';
+import {
+  BSC_CHAIN_ID,
+  CONTRACTS,
+  TRADING_POLICY,
+  AGENT_STUDIO_ID,
+  getBinanceWeb3ApiKey,
+  publicAgentStatus,
+} from '@/lib/agent-config';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-const BSC_CHAIN_ID = 56;
-const PANCAKESWAP_V3_ROUTER = '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4' as const;
-const WBNB_ADDRESS = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c' as const;
+const PANCAKESWAP_V3_ROUTER = CONTRACTS.pancakeV3Router;
+const WBNB_ADDRESS = CONTRACTS.wbnb;
 const BSC_TOKENS = {
-  btsla: '0x3b03f0d4dd21f8a7e0e7a2b9d3b4334f59e9c3e2',
-  baapl: '0x4902c5ebc598265ed2212b559b042de8a5eeec3f',
-  ondo: '0x5b15b1b860023714a5b6710ab31e33d3c8c7d8bf',
+  btsla: CONTRACTS.btsla,
+  baapl: CONTRACTS.baapl,
+  ondo: CONTRACTS.ondo,
 } as const;
 
 const PANCAKE_V3_ABI = [{
@@ -72,8 +79,8 @@ async function getBnbUsdPrice() {
 }
 
 type MinimumOutputResult =
-  | { ok: true; amountOutMinimum: bigint; expectedOut: bigint; source: 'binance-web3' }
-  | { ok: false; reason: string };
+  | { ok: true; amountOutMinimum: bigint; expectedOut: bigint; source: 'binance-web3'; quoteResponseMs: number }
+  | { ok: false; reason: string; quoteResponseMs: number };
 
 /**
  * Fetches a real on-chain quote and derives amountOutMinimum in the OUTPUT token's units.
@@ -106,15 +113,23 @@ async function getBinanceWeb3MinimumOutput({
     slippage: (Number(slippageBps) / 100).toString(),
   });
 
+  // Attach the Binance Web3 Transaction API key when configured. Sent only as a request header
+  // to Binance — never returned to the client or logged.
+  const apiKey = getBinanceWeb3ApiKey();
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (apiKey) headers['X-Api-Key'] = apiKey;
+
+  const startedAt = Date.now();
   try {
     const response = await fetch(`https://web3.binance.com/api/v1/dex/aggregator/quote?${params.toString()}`, {
       signal: AbortSignal.timeout(3000),
-      headers: { Accept: 'application/json' },
+      headers,
       cache: 'no-store',
     });
+    const quoteResponseMs = Date.now() - startedAt;
     const contentType = response.headers.get('content-type') ?? '';
     if (!response.ok || !contentType.includes('application/json')) {
-      return { ok: false, reason: 'Binance Web3 quote unavailable' };
+      return { ok: false, reason: 'Binance Web3 quote unavailable', quoteResponseMs };
     }
     const payload = await response.json() as {
       data?: { toTokenAmount?: string | number; toTokenMinAmount?: string | number };
@@ -124,10 +139,10 @@ async function getBinanceWeb3MinimumOutput({
 
     const rawExpected = payload.data?.toTokenAmount ?? payload.toTokenAmount;
     if (rawExpected === undefined || rawExpected === null || !/^\d+$/.test(String(rawExpected))) {
-      return { ok: false, reason: 'Binance Web3 quote returned no expected output' };
+      return { ok: false, reason: 'Binance Web3 quote returned no expected output', quoteResponseMs };
     }
     const expectedOut = BigInt(String(rawExpected));
-    if (expectedOut <= 0n) return { ok: false, reason: 'Binance Web3 quote returned a non-positive output' };
+    if (expectedOut <= 0n) return { ok: false, reason: 'Binance Web3 quote returned a non-positive output', quoteResponseMs };
 
     // Derive our own minimum from the expected output and our slippage ceiling, in the output
     // token's units. We take the STRICTER of our computed bound and any minimum the aggregator
@@ -139,10 +154,10 @@ async function getBinanceWeb3MinimumOutput({
       : 0n;
     const amountOutMinimum = aggregatorMin > ourMinimum ? aggregatorMin : ourMinimum;
 
-    if (amountOutMinimum <= 0n) return { ok: false, reason: 'Computed a non-positive minimum output' };
-    return { ok: true, amountOutMinimum, expectedOut, source: 'binance-web3' };
+    if (amountOutMinimum <= 0n) return { ok: false, reason: 'Computed a non-positive minimum output', quoteResponseMs };
+    return { ok: true, amountOutMinimum, expectedOut, source: 'binance-web3', quoteResponseMs };
   } catch {
-    return { ok: false, reason: 'Binance Web3 quote request failed' };
+    return { ok: false, reason: 'Binance Web3 quote request failed', quoteResponseMs: Date.now() - startedAt };
   }
 }
 
@@ -309,7 +324,8 @@ export async function POST(request: Request) {
           recommendedRelay: 'private-mempool',
         },
         gasBufferBnb: '0.00015',
-        agentStudio: { skills: ['binance-web3-market-data', 'agentic-wallet', 'bnb-agent-studio'], spotOnly: true },
+        quoteResponseMs: minimumOutput.quoteResponseMs,
+        agentStudio: { id: AGENT_STUDIO_ID, skills: ['binance-web3-market-data', 'agentic-wallet', 'bnb-agent-studio'], spotOnly: TRADING_POLICY.spotOnly },
       });
     }
 
@@ -360,11 +376,12 @@ export async function POST(request: Request) {
 }
 
 export async function GET() {
+  // publicAgentStatus() reports network + which live capabilities are configured (booleans only).
+  // It never exposes AGENT_PRIVATE_KEY, OPENAI_API_KEY, or BINANCE_WEB3_API_KEY values.
   return NextResponse.json({
     status: 'ready',
-    network: 'BSC Mainnet',
-    chainId: BSC_CHAIN_ID,
     targetRouter: PANCAKESWAP_V3_ROUTER,
+    ...publicAgentStatus(),
   });
 }
 
