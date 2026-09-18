@@ -20,7 +20,7 @@ function getEthereumProvider() {
 
 function decimalToWei(value: number) {
   const [whole, fraction = ''] = value.toFixed(18).split('.');
-  return BigInt(whole) * BigInt(10) ** BigInt(18) + BigInt(fraction.padEnd(18, '0'));
+  return BigInt(whole) * BigInt('1000000000000000000') + BigInt(fraction.padEnd(18, '0'));
 }
 
 function formatBnb(wei: bigint) {
@@ -123,6 +123,21 @@ export default function Page() {
     }
   };
 
+  const readJsonResponse = async <T,>(response: Response): Promise<T> => {
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('API endpoint returned an invalid response. Please check route configuration.');
+    }
+    const data = await response.json() as T;
+    if (!response.ok) {
+      const message = typeof data === 'object' && data !== null && 'message' in data && typeof data.message === 'string'
+        ? data.message
+        : 'The API request failed. Please retry.';
+      throw new Error(message);
+    }
+    return data;
+  };
+
   const executeLiveTransaction = async (prompt: string, connectedAddress: string) => {
     const ethereum = getEthereumProvider();
     if (!ethereum) throw new Error('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to execute live transactions.');
@@ -133,8 +148,7 @@ export default function Page() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'quote', prompt }),
     });
-    if (!quoteResponse.ok) throw new Error('Unable to calculate the live BNB amount. Please retry.');
-    const quote = await quoteResponse.json() as { usdAmount: number; requiredBnb: number; gasBufferBnb: number };
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: number; gasBufferBnb: number }>(quoteResponse);
     const requiredWei = decimalToWei(quote.requiredBnb);
     const gasBufferWei = decimalToWei(quote.gasBufferBnb);
     const balanceHex = await ethereum.request({
@@ -200,8 +214,7 @@ export default function Page() {
           chainId: 56,
         }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? 'Simulation failed');
+      const data = await readJsonResponse<{ gasUsed?: number; estimatedGasBnb?: number; slippage?: number; expectedSlippage?: string }>(response);
 
       setSuccessBasket(index);
       setReceipt({
@@ -248,8 +261,7 @@ export default function Page() {
           isDryRun,
         }),
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.message ?? 'Unable to activate the agent.');
+      const result = await readJsonResponse<{ allowance?: { remaining?: number } }>(response);
       setAgentActive(true);
       setAgentRemaining(result.allowance?.remaining ?? amount);
       setAgentThought(isDryRun
@@ -270,8 +282,8 @@ export default function Page() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt }),
       });
-      const parsed = await parseResponse.json();
-      if (!parseResponse.ok || parsed.success !== true) {
+      const parsed = await readJsonResponse<{ success?: boolean; suggestion?: string; suggestions?: string[]; targetToken?: string; hedgeAsset?: string }>(parseResponse);
+      if (parsed.success !== true) {
         throw new Error(parsed.suggestion ?? parsed.suggestions?.[0] ?? 'Could not parse strategy');
       }
 
@@ -289,10 +301,13 @@ export default function Page() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt, basketId: 'AI & Semiconductors', userAddress: walletAddress, isDryRun: true, chainId: 56 }),
         });
-        const result = await executionResponse.json();
-        if (!executionResponse.ok) throw new Error(result.error ?? 'Strategy simulation failed');
+        const result = await readJsonResponse<{ txHash?: string; gasUsed?: number; estimatedGasBnb?: number; slippage?: number; expectedSlippage?: string }>(executionResponse);
         setStrategyStatus(3);
-        setReceipt(result);
+        setReceipt({
+          txHash: result.txHash ?? '',
+          gasUsed: Number(result.gasUsed ?? result.estimatedGasBnb ?? 0),
+          slippage: Number(result.slippage ?? result.expectedSlippage?.replace('%', '') ?? 0),
+        });
         showToast(`Simulation ready: ${parsed.targetToken} → ${parsed.hedgeAsset}. No gas spent.`);
       }
     } catch (error) {
