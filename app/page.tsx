@@ -64,6 +64,8 @@ export default function Page() {
   const [toast, setToast] = useState<string | null>(null);
   const [isDryRun, setIsDryRun] = useState(true);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [executionSpeed, setExecutionSpeed] = useState<'aggressive' | 'guarded'>('aggressive');
+  const [maxSlippage, setMaxSlippage] = useState(1.5);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -129,6 +131,10 @@ export default function Page() {
           showToast('Trade paused: Off-market liquidity depth too low.');
           return;
         }
+        if (data.status === 'live_execution_unavailable') {
+          showToast('Live execution paused: no verified quote endpoint is configured. No signature requested.');
+          return;
+        }
         if (data.status === 'server_error' || response.status === 429) {
           showToast('Network is busy. Retrying network connection...');
           throw new Error(data.error ?? 'Network retry required');
@@ -136,26 +142,15 @@ export default function Page() {
         throw new Error(data.error ?? 'Execution failed');
       }
 
-      // Live mode stops at wallet signing; no private key or transaction is broadcast by the server.
-      if (!isDryRun && ethereum && connectedAddress) {
-        try {
-          const txHash = await ethereum.request({
-            method: 'eth_sendTransaction',
-            params: [{
-              from: connectedAddress,
-              to: '0x1111111254fb6c44bac0bed2854e76f90643097d',
-              value: '0x71afd498d0000', // 0.002 BNB demo cap
-              chainId: BSC_CHAIN_ID,
-            }],
-          }) as string;
-          data.txHash = txHash;
-          data.bscScanUrl = `https://bscscan.com/tx/${txHash}`;
-          data.amountTraded = '$1.00 live demo cap';
-        } catch (error) {
-          const message = error instanceof Error ? error.message.toLowerCase() : '';
-          showToast(message.includes('reject') || message.includes('denied') ? 'Transaction canceled by user.' : 'Wallet signing failed. No funds were moved.');
+      // Live mode may only sign calldata returned by a verified quote service.
+      // Until that service is configured, the API returns 503 and this branch is never reached.
+      if (!isDryRun) {
+        const transaction = data.transaction;
+        if (!transaction || transaction.chainId !== 56 || typeof transaction.to !== 'string' || typeof transaction.data !== 'string') {
+          showToast('Live execution paused: verified calldata is unavailable. No signature requested.');
           return;
         }
+        showToast('Verified calldata received. Wallet signing is ready.');
       }
 
       setSuccessBasket(index);
@@ -175,19 +170,44 @@ export default function Page() {
   const handleStrategy = async (prompt: string) => {
     setStrategyLoading(true);
     setStrategyStatus(1);
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    setStrategyStatus(2);
     try {
-      const response = await fetch('/api/agent/parse-prompt', {
+      const parseResponse = await fetch('/api/agent/parse-prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? 'Strategy failed');
-      showToast(`Strategy parsed: ${data.targetToken} → ${data.hedgeAsset} at ${data.gapThreshold}% gap`);
-    } catch {
-      showToast('Could not parse strategy. Please try again.');
+      const parsed = await parseResponse.json();
+      if (!parseResponse.ok || parsed.success !== true) {
+        throw new Error(parsed.suggestion ?? parsed.suggestions?.[0] ?? 'Could not parse strategy');
+      }
+
+      setStrategyStatus(2);
+      const executionResponse = await fetch('/api/agent/execute-basket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          basketId: parsed.targetToken === 'bNVDA' ? 'AI & Semiconductors' : parsed.targetToken === 'bTSLA' ? 'Magnificent 7 Tech' : 'Defensive Yield',
+          userAddress: walletAddress,
+          isDryRun,
+          chainId: 56,
+        }),
+      });
+      const result = await executionResponse.json();
+      if (!executionResponse.ok) {
+        if (result.status === 'live_execution_unavailable') {
+          throw new Error('Live execution is unavailable until a verified quote endpoint returns unsigned calldata. No signature was requested.');
+        }
+        throw new Error(result.error ?? 'Strategy execution failed');
+      }
+
+      setStrategyStatus(3);
+      setReceipt(result);
+      showToast(isDryRun
+        ? `Simulation ready: ${parsed.targetToken} → ${parsed.hedgeAsset}. No gas spent.`
+        : 'Verified transaction payload ready for wallet signing.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not execute strategy. Please try again.');
     } finally {
       setStrategyLoading(false);
       setTimeout(() => setStrategyStatus(0), 2500);
@@ -221,15 +241,6 @@ export default function Page() {
             <a href="#developer" className="hover:text-white transition-colors">DX report</a>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setIsDryRun((value) => !value)}
-              className={`hidden sm:flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${isDryRun ? 'border-green-400/40 bg-green-400/10 text-green-300' : 'border-red-400/40 bg-red-400/10 text-red-300'}`}
-              aria-pressed={isDryRun}
-              title={isDryRun ? 'Simulates with the Binance Web3 Transaction API. No gas or broadcast.' : 'Prepares a real BSC Mainnet transaction for wallet signing.'}
-            >
-              <span className={`h-2 w-2 rounded-full ${isDryRun ? 'bg-green-400' : 'bg-red-400'}`} />
-              {isDryRun ? 'Dry-Run Mode' : 'Live BSC Mainnet'}
-            </button>
             <button onClick={connectWallet} className="flex min-h-11 items-center gap-2 rounded-lg bg-[#F0B90B] px-3 py-2 text-sm font-bold text-black hover:bg-[#ffd447] transition-colors">
               <Wallet className="w-4 h-4" /> {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : 'Connect wallet'}
             </button>
@@ -237,6 +248,33 @@ export default function Page() {
               {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
             </button>
           </div>
+          <div className="order-3 flex basis-full items-center rounded-xl border border-white/10 bg-white/[0.04] p-1 sm:order-none sm:basis-auto" aria-label="Execution mode">
+            <button
+              onClick={() => setIsDryRun(true)}
+              className={`min-h-10 flex-1 rounded-lg px-3 text-xs font-bold transition-colors sm:flex-none ${isDryRun ? 'bg-[#F0B90B] text-black shadow-lg shadow-[#F0B90B]/10' : 'text-gray-400 hover:text-white'}`}
+              aria-pressed={isDryRun}
+              title="Simulates with the Binance Web3 Transaction API. No gas or broadcast."
+            >
+              ⚡ Dry-Run Simulation
+            </button>
+            <button
+              onClick={() => setIsDryRun(false)}
+              className={`min-h-10 flex-1 rounded-lg px-3 text-xs font-bold transition-colors sm:flex-none ${!isDryRun ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-400 hover:text-white'}`}
+              aria-pressed={!isDryRun}
+              title="Prepares a real BSC Mainnet transaction for wallet signing."
+            >
+              🔥 Live BSC Mainnet
+            </button>
+          </div>
+        </div>
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 border-t border-white/10 px-4 py-3 sm:px-6" aria-label="Aggressive execution controls">
+          <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">Execution profile</span>
+          <button onClick={() => setExecutionSpeed('aggressive')} className={`min-h-9 rounded-lg px-3 text-xs font-bold ${executionSpeed === 'aggressive' ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-500 hover:text-white'}`} aria-pressed={executionSpeed === 'aggressive'}>Aggressive · 1s polling</button>
+          <button onClick={() => setExecutionSpeed('guarded')} className={`min-h-9 rounded-lg px-3 text-xs font-bold ${executionSpeed === 'guarded' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-white'}`} aria-pressed={executionSpeed === 'guarded'}>Guarded</button>
+          <label className="flex min-h-9 items-center gap-2 text-xs text-gray-400">Max slippage
+            <input aria-label="Maximum slippage tolerance" type="range" min="0.5" max="3" step="0.1" value={maxSlippage} onChange={(event) => setMaxSlippage(Number(event.target.value))} className="accent-[#F0B90B]" />
+            <span className="w-10 font-bold text-[#F0B90B]">{maxSlippage.toFixed(1)}%</span>
+          </label>
         </div>
         {mobileMenuOpen && (
           <div className="md:hidden border-t border-white/10 px-4 py-3 space-y-1 bg-[#111]">
