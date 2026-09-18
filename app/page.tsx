@@ -77,7 +77,7 @@ export default function Page() {
   const [activeTxHash, setActiveTxHash] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [executionSpeed, setExecutionSpeed] = useState<'aggressive' | 'guarded'>('aggressive');
-  const [maxSlippage, setMaxSlippage] = useState(1.5);
+  const [maxSlippage, setMaxSlippage] = useState(0.5);
   const [autonomyBudget, setAutonomyBudget] = useState('20');
   const [autonomyUnit, setAutonomyUnit] = useState<'USD' | 'BNB'>('USD');
   const [autonomyFrequency, setAutonomyFrequency] = useState<'aggressive' | 'defensive' | 'dca'>('aggressive');
@@ -90,13 +90,14 @@ export default function Page() {
     const savedMode = window.localStorage.getItem('agentMode') as typeof autonomyFrequency | null;
     const savedSlippage = window.localStorage.getItem('maxSlippage');
     const savedTxHash = window.localStorage.getItem('activeTxHash');
+    const savedAgentActive = window.localStorage.getItem('agentActive') === 'true';
     if (savedAllowance) {
       const amount = Number(savedAllowance.replace(/[^0-9.]/g, ''));
       if (Number.isFinite(amount) && amount > 0) {
         setAutonomyBudget(amount.toFixed(2));
         setAutonomyUnit('USD');
         setAgentRemaining(amount);
-        setAgentActive(true);
+        setAgentActive(savedAgentActive || Boolean(savedAllowance));
         setAgentThought('BSC Mainnet connected -> Allowance restored -> Agent is scanning bTSLA / bAAPL / Ondo spreads...');
       }
     }
@@ -206,7 +207,7 @@ export default function Page() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'quote', prompt, maxSlippage: slippage }),
     });
-    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
     if (quote.reroutedAsset) {
       console.info(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
       setAgentThought(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
@@ -235,7 +236,7 @@ export default function Page() {
         from: connectedAddress,
         to: quote.targetRouter,
         value: `0x${requiredWei.toString(16)}`,
-        data: '0x',
+        data: quote.calldata,
         chainId: BSC_CHAIN_ID,
       }],
     }) as string;
@@ -338,7 +339,7 @@ export default function Page() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'quote', prompt: `Delegate $${usdAmount} allowance`, maxSlippage }),
       });
-      const quote = await readJsonResponse<{ requiredBnb: string; targetRouter: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
+      const quote = await readJsonResponse<{ requiredBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
       if (quote.reroutedAsset) throw new Error(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${maxSlippage}%). Re-routed to Ondo USDY for safety.`);
       const requiredWei = decimalToWei(Number(quote.requiredBnb));
       const balanceWei = BigInt(await ethereum.request({ method: 'eth_getBalance', params: [walletAddress, 'latest'] }) as string);
@@ -346,10 +347,11 @@ export default function Page() {
       if (balanceWei < requiredWei + gasBufferWei) {
         throw new Error(`Insufficient Funds: Available balance is ${formatBnb(balanceWei)} BNB, required order is ${quote.requiredBnb} BNB.`);
       }
-      const txHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: walletAddress, to: quote.targetRouter, value: `0x${requiredWei.toString(16)}`, data: '0x', chainId: BSC_CHAIN_ID }] }) as string;
+      const txHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: walletAddress, to: quote.targetRouter, value: `0x${requiredWei.toString(16)}`, data: quote.calldata, chainId: BSC_CHAIN_ID }] }) as string;
       setActiveTxHash(txHash);
       window.localStorage.setItem('activeTxHash', txHash);
       window.localStorage.setItem('userAllowanceUsd', `$${usdAmount.toFixed(2)}`);
+      window.localStorage.setItem('agentActive', 'true');
       window.localStorage.setItem('agentMode', autonomyFrequency);
       window.localStorage.setItem('maxSlippage', String(maxSlippage));
       const response = await fetch('/api/agent', {
@@ -447,10 +449,7 @@ export default function Page() {
           <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">Execution profile</span>
           <button onClick={() => setExecutionSpeed('aggressive')} className={`min-h-9 rounded-lg px-3 text-xs font-bold ${executionSpeed === 'aggressive' ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-500 hover:text-white'}`} aria-pressed={executionSpeed === 'aggressive'}>Aggressive · 10s polling</button>
           <button onClick={() => setExecutionSpeed('guarded')} className={`min-h-9 rounded-lg px-3 text-xs font-bold ${executionSpeed === 'guarded' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-white'}`} aria-pressed={executionSpeed === 'guarded'}>Guarded</button>
-          <label className="flex min-h-9 items-center gap-2 text-xs text-gray-400">Max slippage
-            <input aria-label="Maximum slippage tolerance" type="range" min="0.1" max="3" step="0.1" value={maxSlippage} onChange={(event) => setMaxSlippage(Number(event.target.value))} className="accent-[#F0B90B]" />
-            <span className="w-10 font-bold text-[#F0B90B]">{maxSlippage.toFixed(1)}%</span>
-          </label>
+          <span className="text-xs text-gray-500">Auto slippage · 0.5% bound</span>
         </div>
         {mobileMenuOpen && (
           <div className="md:hidden border-t border-white/10 px-4 py-3 space-y-1 bg-[#111]">
@@ -504,7 +503,7 @@ export default function Page() {
                 <div className="flex rounded-xl border border-white/10 bg-black/30 p-1"><button onClick={() => setAutonomyUnit('USD')} className={`rounded-lg px-3 text-xs font-bold ${autonomyUnit === 'USD' ? 'bg-[#F0B90B] text-black' : 'text-gray-500'}`}>USD</button><button onClick={() => setAutonomyUnit('BNB')} className={`rounded-lg px-3 text-xs font-bold ${autonomyUnit === 'BNB' ? 'bg-[#F0B90B] text-black' : 'text-gray-500'}`}>BNB</button></div>
               </div>
               <div className="mt-4 grid gap-2 sm:grid-cols-3"><button onClick={() => setAutonomyFrequency('aggressive')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'aggressive' ? 'border-red-400/50 bg-red-400/10' : 'border-white/10'}`}><div className="text-xs font-bold">Aggressive</div><div className="mt-1 text-[11px] text-gray-500">Every 5 mins</div></button><button onClick={() => setAutonomyFrequency('defensive')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'defensive' ? 'border-[#F0B90B]/50 bg-[#F0B90B]/10' : 'border-white/10'}`}><div className="text-xs font-bold">Defensive</div><div className="mt-1 text-[11px] text-gray-500">Hourly</div></button><button onClick={() => setAutonomyFrequency('dca')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'dca' ? 'border-green-400/50 bg-green-400/10' : 'border-white/10'}`}><div className="text-xs font-bold">DCA</div><div className="mt-1 text-[11px] text-gray-500">Daily</div></button></div>
-              <button onClick={handleActivateAgent} className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#F0B90B] font-bold text-black hover:bg-[#ffd447]"><ShieldCheck className="h-4 w-4" /> {agentActive ? 'Update allowance & keep agent active' : 'Delegate & activate agent'}</button>
+              <button onClick={handleActivateAgent} className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#F0B90B] font-bold text-black hover:bg-[#ffd447]"><ShieldCheck className="h-4 w-4" /> {agentActive ? 'AGENT DELEGATED & EXECUTING LIVE' : 'Delegate & activate agent'}</button>
             </div>
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 sm:p-6"><div className="mb-5 flex items-center gap-2 font-bold"><Gauge className="h-4 w-4 text-[#F0B90B]" /> Live reasoner console</div><div className="rounded-xl bg-black/40 p-4 font-mono text-xs leading-6 text-gray-400"><div className="text-green-300">● Guardrails online</div><div>{agentThought}</div><div className="mt-2 text-gray-500">Budget remaining: <span className="text-white">{agentRemaining === null ? '—' : `${autonomyUnit === 'USD' ? '$' : ''}${agentRemaining.toFixed(2)}${autonomyUnit === 'BNB' ? ' BNB' : ''}`}</span></div><div className="text-gray-500">Slippage guard: <span className="text-[#F0B90B]">1.2% max</span></div></div><div className="mt-4 flex gap-2 text-xs text-gray-500"><CircleAlert className="h-4 w-4 shrink-0 text-[#F0B90B]" /> High slippage automatically pauses the trade and routes attention to stable yield.</div></div>
           </div>
