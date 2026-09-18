@@ -143,7 +143,7 @@ export default function Page() {
             method: 'eth_sendTransaction',
             params: [{
               from: connectedAddress,
-              to: '0x1111111254fb6c44bac0bed2854e76f90643097d',
+              to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
               value: '0x71afd498d0000', // 0.002 BNB demo cap
               chainId: BSC_CHAIN_ID,
             }],
@@ -178,10 +178,10 @@ export default function Page() {
     await new Promise((resolve) => setTimeout(resolve, 350));
     setStrategyStatus(2);
     try {
-      const response = await fetch('/api/agent/parse-prompt', {
+      const response = await fetch('/api/agent/route', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, userAddress: walletAddress, isDryRun }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Strategy failed');
