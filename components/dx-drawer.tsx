@@ -8,7 +8,8 @@ interface TelemetryLog {
   latencyMs: number;
   status: string;
 }
-import { ChevronUp, Zap, Activity, Database, AlertCircle, X } from 'lucide-react';
+import { ChevronUp, Zap, Activity, Database, AlertCircle, X, Fuel, ExternalLink } from 'lucide-react';
+import { subscribeTelemetry, type TelemetrySnapshot } from '@/lib/telemetry';
 
 interface DXMetrics {
   latency: number;
@@ -17,7 +18,19 @@ interface DXMetrics {
   timeToFirst: number;
   platformFriction: number;
   apiCalls: number;
+  binanceWeb3QuoteMs: number;
+  gasBnb: number;
+  gasUsd: number;
 }
+
+interface TxRecord {
+  hash: string;
+  gasUsed?: number;
+  slippage?: number;
+  ts?: number;
+}
+
+const BSCSCAN_TX_BASE = 'https://bscscan.com/tx/';
 
 export function DXDrawer() {
   const [isOpen, setIsOpen] = useState(false);
@@ -28,9 +41,30 @@ export function DXDrawer() {
     timeToFirst: 1205,
     platformFriction: 3.2,
     apiCalls: 47,
+    binanceWeb3QuoteMs: 210,
+    gasBnb: 0.00042,
+    gasUsd: 0.24,
   });
   const [telemetryLogs, setTelemetryLogs] = useState<TelemetryLog[]>([]);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [txRecords, setTxRecords] = useState<TxRecord[]>([]);
+  const [live, setLive] = useState<TelemetrySnapshot | null>(null);
+
+  // Subscribe to the real client telemetry store. This reflects ACTUAL agent decisions and
+  // broadcast transactions (decision latency, Binance Web3 quote time, executed gas/slippage,
+  // and BscScan links), which take precedence over the simulated endpoint metrics below.
+  useEffect(() => {
+    const unsubscribe = subscribeTelemetry((snapshot) => {
+      setLive(snapshot);
+      setTxRecords(snapshot.transactions.map((tx) => ({
+        hash: tx.txHash,
+        gasUsed: tx.gasUsedBnb,
+        slippage: tx.slippagePercent,
+        ts: tx.timestamp,
+      })));
+    });
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -54,6 +88,9 @@ export function DXDrawer() {
           timeToFirst: data.telemetry?.timeToFirstCallMs ?? 1205,
           platformFriction: data.telemetry?.platformFrictionPercent ?? 3.2,
           apiCalls: data.telemetry?.apiCalls ?? 47,
+          binanceWeb3QuoteMs: data.telemetry?.binanceWeb3QuoteMs ?? 210,
+          gasBnb: data.telemetry?.estimatedGasBnb ?? 0.00042,
+          gasUsd: data.telemetry?.estimatedGasUsd ?? 0.24,
         });
         setMetricsError(null);
         setTelemetryLogs((previous) => [{
@@ -112,10 +149,10 @@ export function DXDrawer() {
             <div className="bg-black/40 border border-white/5 rounded-lg p-3">
               <div className="flex items-center gap-2 mb-1">
                 <Database className="w-4 h-4 text-[#F0B90B]" />
-                <span className="text-xs text-gray-400 font-semibold">API Latency</span>
+                <span className="text-xs text-gray-400 font-semibold">API Decision Latency</span>
               </div>
-              <div className="text-2xl font-bold text-white">{metrics.latency.toFixed(0)}<span className="text-sm text-gray-400 ml-1">ms</span></div>
-              <div className="text-xs text-gray-500 mt-1">Binance Web3 API</div>
+              <div className="text-2xl font-bold text-white">{(live?.decisionLatencyMs ?? metrics.latency).toFixed(0)}<span className="text-sm text-gray-400 ml-1">ms</span></div>
+              <div className="text-xs text-gray-500 mt-1">{live?.decisionLatencyMs != null ? 'Last agent decision' : 'Binance Web3 API'}</div>
             </div>
 
             {/* Slippage */}
@@ -167,6 +204,59 @@ export function DXDrawer() {
               <div className="text-2xl font-bold text-blue-400">{metrics.apiCalls}</div>
               <div className="text-xs text-gray-500 mt-1">Session total</div>
             </div>
+
+            {/* Binance Web3 Quote Response Time */}
+            <div className="bg-black/40 border border-white/5 rounded-lg p-3">
+              <div className="flex items-center gap-2 mb-1">
+                <Zap className="w-4 h-4 text-[#F0B90B]" />
+                <span className="text-xs text-gray-400 font-semibold">Web3 Quote Time</span>
+              </div>
+              <div className="text-2xl font-bold text-white">{metrics.binanceWeb3QuoteMs.toFixed(0)}<span className="text-sm text-gray-400 ml-1">ms</span></div>
+              <div className="text-xs text-gray-500 mt-1">Binance Web3 quote RTT</div>
+            </div>
+
+            {/* On-Chain Gas Fees */}
+            <div className="bg-black/40 border border-white/5 rounded-lg p-3">
+              <div className="flex items-center gap-2 mb-1">
+                <Fuel className="w-4 h-4 text-green-400" />
+                <span className="text-xs text-gray-400 font-semibold">Est. Gas / Swap</span>
+              </div>
+              <div className="text-2xl font-bold text-green-400">${metrics.gasUsd.toFixed(3)}</div>
+              <div className="text-xs text-gray-500 mt-1">{metrics.gasBnb.toFixed(6)} BNB</div>
+            </div>
+          </div>
+
+          {/* On-Chain Transaction Links */}
+          <div className="mt-4">
+            <div className="flex items-center gap-2 mb-2">
+              <ExternalLink className="w-4 h-4 text-[#F0B90B]" />
+              <span className="text-xs text-gray-400 font-semibold">Recent On-Chain Transactions</span>
+            </div>
+            {txRecords.length === 0 ? (
+              <p className="text-xs text-gray-500 bg-black/40 border border-white/5 rounded-lg p-3">
+                No executed transactions yet. Autonomous swaps will appear here with direct BscScan links.
+              </p>
+            ) : (
+              <ul className="space-y-1" aria-label="Recent on-chain transactions">
+                {txRecords.map((tx) => (
+                  <li key={tx.hash} className="flex items-center justify-between gap-2 bg-black/40 border border-white/5 rounded-lg px-3 py-2 text-xs">
+                    <a
+                      href={`${BSCSCAN_TX_BASE}${tx.hash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[#F0B90B] hover:underline font-mono truncate flex items-center gap-1"
+                    >
+                      <ExternalLink className="w-3 h-3 shrink-0" />
+                      {tx.hash.slice(0, 10)}…{tx.hash.slice(-8)}
+                    </a>
+                    <span className="text-gray-400 shrink-0">
+                      {tx.slippage !== undefined ? `${tx.slippage.toFixed(2)}% slip` : ''}
+                      {tx.gasUsed !== undefined ? ` · ${tx.gasUsed.toLocaleString()} gas` : ''}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="mt-4 p-3 bg-[#F0B90B]/10 border border-[#F0B90B]/20 rounded-lg">

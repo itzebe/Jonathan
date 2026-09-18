@@ -34,6 +34,7 @@ import { BasketCard } from '@/components/basket-card';
 import { MarketGapScanner } from '@/components/market-gap-scanner';
 import { StrategyInput } from '@/components/strategy-input';
 import { DXDrawer } from '@/components/dx-drawer';
+import { recordDecision, recordTransaction } from '@/lib/telemetry';
 
 const baskets = [
   {
@@ -112,13 +113,20 @@ export default function Page() {
     let cancelled = false;
     const scan = async () => {
       try {
+        const decisionStartedAt = performance.now();
         const response = await fetch('/api/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'quote', prompt: 'Scan bTSLA bAAPL and Ondo price gaps on BSC Mainnet', maxSlippage }),
         });
-        const result = await readJsonResponse<{ calculatedSlippage?: number; reroutedAsset?: string; requiredBnb?: string }>(response);
+        const result = await readJsonResponse<{ calculatedSlippage?: number; reroutedAsset?: string; requiredBnb?: string; quoteResponseMs?: number; maxSlippagePercent?: number; gasBufferBnb?: string }>(response);
         if (cancelled) return;
+        recordDecision({
+          decisionLatencyMs: performance.now() - decisionStartedAt,
+          quoteResponseMs: result.quoteResponseMs ?? null,
+          gasBnb: Number(result.gasBufferBnb) || null,
+          slippagePercent: result.maxSlippagePercent ?? maxSlippage,
+        });
         if (result.reroutedAsset) {
           setAgentThought(`Trade Paused: On-chain slippage (${result.calculatedSlippage}% ) exceeded your limit (${maxSlippage}%). Routed to Ondo USDY.`.replace('% )', '%'));
         } else {
@@ -140,6 +148,20 @@ export default function Page() {
   const showToast = (message: string) => {
     setToast(message);
     setTimeout(() => setToast(null), 4000);
+  };
+
+  // Persist an executed on-chain transaction so the DX Telemetry Drawer can render its
+  // BscScan link, slippage, and gas without needing a shared store. Keeps the most recent 10.
+  const recordTx = (record: { hash: string; gasUsed?: number; slippage?: number }) => {
+    if (!record.hash) return;
+    try {
+      const existing = JSON.parse(window.localStorage.getItem('equipulseTxHistory') ?? '[]') as unknown[];
+      const next = [{ ...record, ts: Date.now() }, ...existing.filter((entry) => (entry as { hash?: string }).hash !== record.hash)].slice(0, 10);
+      window.localStorage.setItem('equipulseTxHistory', JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent('equipulse:tx'));
+    } catch {
+      // localStorage may be unavailable (private mode); telemetry links are non-critical.
+    }
   };
 
   const ensureBscMainnet = async (ethereum: EthereumProvider): Promise<boolean> => {
@@ -202,12 +224,19 @@ export default function Page() {
     if (!ethereum) throw new Error('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to execute live transactions.');
     if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
 
+    const decisionStartedAt = performance.now();
     const quoteResponse = await fetch('/api/agent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'quote', prompt, maxSlippage: slippage }),
     });
-    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string; quoteResponseMs?: number; maxSlippagePercent?: number }>(quoteResponse);
+    recordDecision({
+      decisionLatencyMs: performance.now() - decisionStartedAt,
+      quoteResponseMs: quote.quoteResponseMs ?? null,
+      gasBnb: Number(quote.gasBufferBnb) || null,
+      slippagePercent: quote.maxSlippagePercent ?? slippage,
+    });
     if (quote.reroutedAsset) {
       console.info(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
       setAgentThought(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
@@ -230,7 +259,7 @@ export default function Page() {
       throw new Error(`Insufficient Funds: Your balance is ${formatBnb(balanceWei)} BNB, but $${quote.usdAmount} USD requires ${formatBnb(requiredWei)} BNB.`);
     }
 
-    return await ethereum.request({
+    const txHash = await ethereum.request({
       method: 'eth_sendTransaction',
       params: [{
         from: connectedAddress,
@@ -240,6 +269,14 @@ export default function Page() {
         chainId: BSC_CHAIN_ID,
       }],
     }) as string;
+    recordTransaction({
+      txHash,
+      label: prompt,
+      gasUsedBnb: Number(quote.gasBufferBnb) || 0,
+      slippagePercent: quote.maxSlippagePercent ?? slippage,
+      mode: 'live',
+    });
+    return txHash;
   };
 
   const handleInvest = async (index: number) => {
