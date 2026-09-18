@@ -221,20 +221,29 @@ export default function Page() {
             <a href="#developer" className="hover:text-white transition-colors">DX report</a>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setIsDryRun((value) => !value)}
-              className={`hidden sm:flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${isDryRun ? 'border-green-400/40 bg-green-400/10 text-green-300' : 'border-red-400/40 bg-red-400/10 text-red-300'}`}
-              aria-pressed={isDryRun}
-              title={isDryRun ? 'Simulates with the Binance Web3 Transaction API. No gas or broadcast.' : 'Prepares a real BSC Mainnet transaction for wallet signing.'}
-            >
-              <span className={`h-2 w-2 rounded-full ${isDryRun ? 'bg-green-400' : 'bg-red-400'}`} />
-              {isDryRun ? 'Dry-Run Mode' : 'Live BSC Mainnet'}
-            </button>
             <button onClick={connectWallet} className="flex min-h-11 items-center gap-2 rounded-lg bg-[#F0B90B] px-3 py-2 text-sm font-bold text-black hover:bg-[#ffd447] transition-colors">
               <Wallet className="w-4 h-4" /> {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : 'Connect wallet'}
             </button>
             <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="md:hidden p-2 text-gray-300" aria-label="Toggle menu">
               {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          </div>
+          <div className="order-3 flex basis-full items-center rounded-xl border border-white/10 bg-white/[0.04] p-1 sm:order-none sm:basis-auto" aria-label="Execution mode">
+            <button
+              onClick={() => setIsDryRun(true)}
+              className={`min-h-10 flex-1 rounded-lg px-3 text-xs font-bold transition-colors sm:flex-none ${isDryRun ? 'bg-[#F0B90B] text-black shadow-lg shadow-[#F0B90B]/10' : 'text-gray-400 hover:text-white'}`}
+              aria-pressed={isDryRun}
+              title="Simulates with the Binance Web3 Transaction API. No gas or broadcast."
+            >
+              ⚡ Dry-Run Simulation
+            </button>
+            <button
+              onClick={() => setIsDryRun(false)}
+              className={`min-h-10 flex-1 rounded-lg px-3 text-xs font-bold transition-colors sm:flex-none ${!isDryRun ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-400 hover:text-white'}`}
+              aria-pressed={!isDryRun}
+              title="Prepares a real BSC Mainnet transaction for wallet signing."
+            >
+              🔥 Live BSC Mainnet
             </button>
           </div>
         </div>
