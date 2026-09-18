@@ -25,7 +25,25 @@ const PANCAKE_V3_ABI = [{
     { name: 'sqrtPriceLimitX96', type: 'uint160' },
   ] }],
   outputs: [{ name: 'amountOut', type: 'uint256' }],
+}, {
+  // Deadline-guarded multicall wrapper. Bundling the swap inside multicall(deadline, data)
+  // makes the router revert if the transaction is mined after `deadline`, which prevents a
+  // bot from holding the signed tx in the mempool and executing it later at a worse price.
+  name: 'multicall',
+  type: 'function',
+  stateMutability: 'payable',
+  inputs: [
+    { name: 'deadline', type: 'uint256' },
+    { name: 'data', type: 'bytes[]' },
+  ],
+  outputs: [{ name: 'results', type: 'bytes[]' }],
 }] as const;
+
+// Hard ceiling on how far execution price may deviate from the quote, in basis points.
+// Even if a caller passes a looser slippage, the agent never signs beyond this bound.
+const MAX_SLIPPAGE_BPS = 100n; // 1.00%
+// Swaps must be mined quickly; a short deadline shrinks the MEV window.
+const EXECUTION_DEADLINE_SECONDS = 45;
 
 function safeAddress(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : ZERO_ADDRESS;
@@ -53,21 +71,39 @@ async function getBnbUsdPrice() {
   }
 }
 
+type MinimumOutputResult =
+  | { ok: true; amountOutMinimum: bigint; expectedOut: bigint; source: 'binance-web3' }
+  | { ok: false; reason: string };
+
+/**
+ * Fetches a real on-chain quote and derives amountOutMinimum in the OUTPUT token's units.
+ *
+ * This is the core MEV defense: the swap will revert on-chain unless it returns at least
+ * `amountOutMinimum`, so a sandwich attacker cannot push the effective price past our bound.
+ *
+ * It FAILS CLOSED. If we cannot obtain a trustworthy quote, we return { ok: false } and the
+ * caller refuses to build calldata. We never fall back to a guessed/zero minimum, because an
+ * unbounded (or wrong-unit) minimum is precisely what bots exploit.
+ */
 async function getBinanceWeb3MinimumOutput({
   tokenOut,
   amountIn,
   userWalletAddress,
+  slippageBps,
 }: {
   tokenOut: `0x${string}`;
   amountIn: bigint;
   userWalletAddress: `0x${string}`;
-}) {
+  slippageBps: bigint;
+}): Promise<MinimumOutputResult> {
   const params = new URLSearchParams({
     binanceChainId: String(BSC_CHAIN_ID),
     fromTokenAddress: WBNB_ADDRESS,
     toTokenAddress: tokenOut,
     amount: amountIn.toString(),
     userWalletAddress,
+    // Express our slippage tolerance as a percentage so the aggregator's own minimum reflects it.
+    slippage: (Number(slippageBps) / 100).toString(),
   });
 
   try {
@@ -77,20 +113,36 @@ async function getBinanceWeb3MinimumOutput({
       cache: 'no-store',
     });
     const contentType = response.headers.get('content-type') ?? '';
-    if (!response.ok || !contentType.includes('application/json')) throw new Error('Binance Web3 quote unavailable');
-    const payload = await response.json() as { data?: { toTokenMinAmount?: string | number }; toTokenMinAmount?: string | number };
-    const rawMinimum = payload.data?.toTokenMinAmount ?? payload.toTokenMinAmount;
-    if (rawMinimum === undefined || rawMinimum === null || !/^\\d+(?:\\.\\d+)?$/.test(String(rawMinimum))) {
-      throw new Error('Binance Web3 quote returned no minimum output');
+    if (!response.ok || !contentType.includes('application/json')) {
+      return { ok: false, reason: 'Binance Web3 quote unavailable' };
     }
-    return { amountOutMinimum: BigInt(String(rawMinimum)), source: 'binance-web3' as const };
-  } catch {
-    // The token decimals are not available from the fallback input, so retain a
-    // conservative 0.5% bound in the amount domain supplied by the quote request.
-    return {
-      amountOutMinimum: (amountIn * 995n) / 1000n,
-      source: 'fallback-0.5-percent' as const,
+    const payload = await response.json() as {
+      data?: { toTokenAmount?: string | number; toTokenMinAmount?: string | number };
+      toTokenAmount?: string | number;
+      toTokenMinAmount?: string | number;
     };
+
+    const rawExpected = payload.data?.toTokenAmount ?? payload.toTokenAmount;
+    if (rawExpected === undefined || rawExpected === null || !/^\d+$/.test(String(rawExpected))) {
+      return { ok: false, reason: 'Binance Web3 quote returned no expected output' };
+    }
+    const expectedOut = BigInt(String(rawExpected));
+    if (expectedOut <= 0n) return { ok: false, reason: 'Binance Web3 quote returned a non-positive output' };
+
+    // Derive our own minimum from the expected output and our slippage ceiling, in the output
+    // token's units. We take the STRICTER of our computed bound and any minimum the aggregator
+    // returned, so the on-chain floor is never looser than MAX_SLIPPAGE_BPS allows.
+    const ourMinimum = (expectedOut * (10_000n - slippageBps)) / 10_000n;
+    const rawAggregatorMin = payload.data?.toTokenMinAmount ?? payload.toTokenMinAmount;
+    const aggregatorMin = rawAggregatorMin !== undefined && rawAggregatorMin !== null && /^\d+$/.test(String(rawAggregatorMin))
+      ? BigInt(String(rawAggregatorMin))
+      : 0n;
+    const amountOutMinimum = aggregatorMin > ourMinimum ? aggregatorMin : ourMinimum;
+
+    if (amountOutMinimum <= 0n) return { ok: false, reason: 'Computed a non-positive minimum output' };
+    return { ok: true, amountOutMinimum, expectedOut, source: 'binance-web3' };
+  } catch {
+    return { ok: false, reason: 'Binance Web3 quote request failed' };
   }
 }
 
@@ -170,12 +222,47 @@ export async function POST(request: Request) {
           ? BSC_TOKENS.baapl
           : BSC_TOKENS.btsla;
       const recipient = /^0x[a-fA-F0-9]{40}$/.test(userAddress) ? userAddress as `0x${string}` : ZERO_ADDRESS as `0x${string}`;
+
+      // A swap can never be signed to the zero address as recipient — that would burn the output.
+      if (recipient === ZERO_ADDRESS) {
+        return NextResponse.json({
+          status: 'wallet_required',
+          message: 'Connect a valid BSC wallet address before requesting executable calldata.',
+        }, { status: 400 });
+      }
+
+      // Clamp the caller's requested slippage to the agent's hard ceiling. A looser request
+      // is silently tightened; it can never widen the MEV window beyond MAX_SLIPPAGE_BPS.
+      const requestedSlippage = Number(body?.maxSlippage);
+      const requestedBps = Number.isFinite(requestedSlippage) && requestedSlippage > 0
+        ? BigInt(Math.round(requestedSlippage * 100))
+        : MAX_SLIPPAGE_BPS;
+      const slippageBps = requestedBps < MAX_SLIPPAGE_BPS ? requestedBps : MAX_SLIPPAGE_BPS;
+
       const minimumOutput = await getBinanceWeb3MinimumOutput({
         tokenOut: selectedToken,
         amountIn,
         userWalletAddress: recipient,
+        slippageBps,
       });
-      const calldata = encodeFunctionData({
+
+      // FAIL CLOSED: with no verified minimum output we refuse to emit calldata. Signing a swap
+      // without an enforceable amountOutMinimum is what lets MEV bots sandwich the trade.
+      if (!minimumOutput.ok) {
+        return NextResponse.json({
+          status: 'quote_unavailable',
+          mode: 'LIVE_MAINNET_AUTONOMOUS',
+          chainId: BSC_CHAIN_ID,
+          targetRouter: PANCAKESWAP_V3_ROUTER,
+          calldata: null,
+          broadcast: false,
+          message: `Execution blocked: ${minimumOutput.reason}. Refusing to sign a swap without slippage protection.`,
+          timestamp: Date.now(),
+        }, { status: 503 });
+      }
+
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + EXECUTION_DEADLINE_SECONDS);
+      const swapCalldata = encodeFunctionData({
         abi: PANCAKE_V3_ABI,
         functionName: 'exactInputSingle',
         args: [{
@@ -188,12 +275,14 @@ export async function POST(request: Request) {
           sqrtPriceLimitX96: 0n,
         }],
       });
-      const maxSlippage = Number(body?.maxSlippage);
-      const calculatedSlippage = 0.92;
-      const reroutedAsset = Number.isFinite(maxSlippage) && calculatedSlippage > maxSlippage ? 'Ondo USDY' : undefined;
-      if (reroutedAsset) {
-        console.info(`Slippage Guard Triggered (${calculatedSlippage}% > Max ${maxSlippage}%). Re-routed to Ondo USDY for safety.`);
-      }
+      // Wrap the swap in a deadline-guarded multicall so the router reverts if the tx is mined late.
+      const calldata = encodeFunctionData({
+        abi: PANCAKE_V3_ABI,
+        functionName: 'multicall',
+        args: [deadline, [swapCalldata]],
+      });
+
+      const slippagePercent = Number(slippageBps) / 100;
       return NextResponse.json({
         status: 'success',
         mode: 'LIVE_MAINNET_AUTONOMOUS',
@@ -203,12 +292,22 @@ export async function POST(request: Request) {
         targetRouter: PANCAKESWAP_V3_ROUTER,
         calldata,
         amountOutMinimum: minimumOutput.amountOutMinimum.toString(),
+        expectedOut: minimumOutput.expectedOut.toString(),
         quoteSource: minimumOutput.source,
         bnbUsdPrice: priceResult.price,
         isFallbackPrice: priceResult.isFallbackPrice,
-        calculatedSlippage,
-        maxSlippage: Number.isFinite(maxSlippage) ? maxSlippage : null,
-        reroutedAsset,
+        maxSlippagePercent: slippagePercent,
+        deadline: deadline.toString(),
+        deadlineSeconds: EXECUTION_DEADLINE_SECONDS,
+        // Broadcasting through a private/MEV-protected relay (e.g. bloXroute Protect, Merkle,
+        // 48 Club Puissant) keeps the signed tx out of the public mempool so it cannot be seen
+        // and sandwiched before it lands. Public-mempool broadcast is not MEV-safe.
+        mevProtection: {
+          amountOutMinimumEnforced: true,
+          deadlineGuarded: true,
+          slippageCappedBps: Number(MAX_SLIPPAGE_BPS),
+          recommendedRelay: 'private-mempool',
+        },
         gasBufferBnb: '0.00015',
         agentStudio: { skills: ['binance-web3-market-data', 'agentic-wallet', 'bnb-agent-studio'], spotOnly: true },
       });
