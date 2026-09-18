@@ -130,9 +130,15 @@ export default function Page() {
     }
     const data = await response.json() as T;
     if (!response.ok) {
-      const message = typeof data === 'object' && data !== null && 'message' in data && typeof data.message === 'string'
-        ? data.message
-        : 'The API request failed. Please retry.';
+      const record = typeof data === 'object' && data !== null ? data as Record<string, unknown> : {};
+      const nestedError = record.error && typeof record.error === 'object' ? record.error as Record<string, unknown> : null;
+      const message = typeof record.message === 'string'
+        ? record.message
+        : typeof nestedError?.message === 'string'
+          ? nestedError.message
+          : typeof record.error === 'string'
+            ? record.error
+            : 'The API request failed. Please retry.';
       throw new Error(message);
     }
     return data;
@@ -148,7 +154,13 @@ export default function Page() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'quote', prompt }),
     });
-    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: number; gasBufferBnb: number }>(quoteResponse);
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: number; gasBufferBnb: number; transaction?: { to: string; data: string; value?: string; chainId: number } }>(quoteResponse);
+    if (!Number.isFinite(quote.requiredBnb) || quote.requiredBnb <= 0) {
+      throw new Error('Quote unavailable. The pricing service returned an invalid order amount. No transaction was submitted.');
+    }
+    if (!quote.transaction || quote.transaction.chainId !== 56 || !quote.transaction.to || !quote.transaction.data) {
+      throw new Error('Quote unavailable. No verified BSC transaction calldata was returned. No transaction was submitted.');
+    }
     const requiredWei = decimalToWei(quote.requiredBnb);
     const gasBufferWei = decimalToWei(quote.gasBufferBnb);
     const balanceHex = await ethereum.request({
@@ -225,13 +237,18 @@ export default function Page() {
       showToast('Simulation passed: no gas spent.');
       setTimeout(() => setSuccessBasket(null), 3000);
     } catch (error) {
-      const message = error instanceof Error ? error.message.toLowerCase() : '';
+      const rawMessage = error instanceof Error ? error.message : 'Unknown execution error';
+      const message = rawMessage.toLowerCase();
       if (message.includes('reject') || message.includes('denied') || message.includes('user rejected')) {
-        showToast('Transaction canceled by user.');
+        showToast('Transaction cancelled. The wallet signature was rejected; no funds were moved.');
       } else if (message.includes('bsc mainnet')) {
-        showToast('Please switch wallet network to BSC Mainnet to continue.');
+        showToast('Wrong network. This application requires BNB Smart Chain Mainnet.');
+      } else if (message.includes('insufficient')) {
+        showToast(rawMessage);
+      } else if (message.includes('quote') || message.includes('market')) {
+        showToast(`Quote unavailable. ${rawMessage}`);
       } else {
-        showToast('Execution failed safely. Please retry.');
+        showToast(`Transaction failed. ${rawMessage}`);
       }
     } finally {
       setLoadingBasket(null);
@@ -262,12 +279,19 @@ export default function Page() {
         }),
       });
       const result = await readJsonResponse<{ allowance?: { remaining?: number } }>(response);
+      if (!isDryRun && result.status === 'authorization_required') {
+        setAgentActive(false);
+        setAgentRemaining(result.allowance?.remaining ?? amount);
+        setAgentThought('Authorization required — no autonomous trade can execute until delegation is signed and verified.');
+        showToast('Authorization required. Sign the delegation transaction to activate the agent.');
+        return;
+      }
       setAgentActive(true);
       setAgentRemaining(result.allowance?.remaining ?? amount);
       setAgentThought(isDryRun
         ? 'Simulation allowance active — no wallet funds can move.'
         : 'Allowance active — monitoring gaps within your approved cap.');
-      showToast(isDryRun ? 'Safe autonomous simulation activated.' : 'Allowance activated with your explicit approval.');
+      showToast(isDryRun ? 'Safe autonomous simulation activated.' : 'Agent is active within the approved allowance.');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not activate the agent.');
     }

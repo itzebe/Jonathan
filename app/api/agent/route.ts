@@ -25,12 +25,31 @@ async function getBnbUsdPrice() {
     const price = Number(data?.price);
     if (!Number.isFinite(price) || price <= 0) throw new Error('Invalid BNB price');
     return price;
-  } catch {
-    return 600;
+  } catch (error) {
+    throw new Error(error instanceof Error ? `Market data unavailable: ${error.message}` : 'Market data unavailable');
   }
 }
 
+function requestId() {
+  return crypto.randomUUID();
+}
+
+function jsonResponse(payload: Record<string, unknown>, status = 200) {
+  const id = requestId();
+  return NextResponse.json({
+    success: status >= 200 && status < 300,
+    data: status >= 200 && status < 300 ? payload : null,
+    error: status >= 200 && status < 300 ? null : {
+      code: typeof payload.code === 'string' ? payload.code : 'AGENT_REQUEST_FAILED',
+      message: typeof payload.message === 'string' ? payload.message : 'Agent request failed',
+    },
+    requestId: id,
+    ...payload,
+  }, { status, headers: { 'x-request-id': id } });
+}
+
 export async function POST(request: Request) {
+  const id = requestId();
   try {
     const body = await request.json();
     const prompt = typeof body?.prompt === 'string' && body.prompt.trim()
@@ -49,13 +68,13 @@ export async function POST(request: Request) {
       if (!body?.isDryRun && userAddress === ZERO_ADDRESS) {
         return NextResponse.json({ status: 'wallet_required', message: 'Connect a BSC Mainnet wallet before activating live autonomy.' }, { status: 400 });
       }
-      return NextResponse.json({
-        status: 'success',
+      return jsonResponse({
+        status: body?.isDryRun ? 'success' : 'authorization_required',
         mode: body?.isDryRun ? 'DRY_RUN_AUTONOMY' : 'LIVE_GUARDED_AUTONOMY',
         network: 'BSC Mainnet (Chain ID 56)',
         allowance: { amount: budget, unit, remaining: budget, frequency, maxSlippage: 1.2 },
         guardrails: { budgetCap: true, walletLiquidity: true, slippageRedirect: 'Ondo USDY' },
-        message: 'Allowance recorded. Autonomous actions require a verified quote and pass every guardrail before signing.',
+        message: body?.isDryRun ? 'Simulation allowance recorded. No funds can move.' : 'Authorization required before autonomous execution can be activated.',
         timestamp: Date.now(),
       });
     }
@@ -101,10 +120,15 @@ export async function POST(request: Request) {
       timestamp: Date.now(),
     }, { status: 503 });
   } catch (error) {
-    return NextResponse.json(
-      { status: 'error', error: error instanceof Error ? error.message : 'Invalid payload' },
-      { status: 400 },
-    );
+    const message = error instanceof Error ? error.message : 'Invalid payload';
+    return NextResponse.json({
+      success: false,
+      data: null,
+      error: { code: 'AGENT_REQUEST_FAILED', message },
+      requestId: id,
+      status: 'error',
+      message,
+    }, { status: 400, headers: { 'x-request-id': id } });
   }
 }
 
