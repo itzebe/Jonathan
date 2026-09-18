@@ -64,6 +64,8 @@ export default function Page() {
   const [toast, setToast] = useState<string | null>(null);
   const [isDryRun, setIsDryRun] = useState(true);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [executionSpeed, setExecutionSpeed] = useState<'aggressive' | 'guarded'>('aggressive');
+  const [maxSlippage, setMaxSlippage] = useState(1.5);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -129,6 +131,10 @@ export default function Page() {
           showToast('Trade paused: Off-market liquidity depth too low.');
           return;
         }
+        if (data.status === 'live_execution_unavailable') {
+          showToast('Live execution paused: no verified quote endpoint is configured. No signature requested.');
+          return;
+        }
         if (data.status === 'server_error' || response.status === 429) {
           showToast('Network is busy. Retrying network connection...');
           throw new Error(data.error ?? 'Network retry required');
@@ -136,26 +142,15 @@ export default function Page() {
         throw new Error(data.error ?? 'Execution failed');
       }
 
-      // Live mode stops at wallet signing; no private key or transaction is broadcast by the server.
-      if (!isDryRun && ethereum && connectedAddress) {
-        try {
-          const txHash = await ethereum.request({
-            method: 'eth_sendTransaction',
-            params: [{
-              from: connectedAddress,
-              to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
-              value: '0x71afd498d0000', // 0.002 BNB demo cap
-              chainId: BSC_CHAIN_ID,
-            }],
-          }) as string;
-          data.txHash = txHash;
-          data.bscScanUrl = `https://bscscan.com/tx/${txHash}`;
-          data.amountTraded = '$1.00 live demo cap';
-        } catch (error) {
-          const message = error instanceof Error ? error.message.toLowerCase() : '';
-          showToast(message.includes('reject') || message.includes('denied') ? 'Transaction canceled by user.' : 'Wallet signing failed. No funds were moved.');
+      // Live mode may only sign calldata returned by a verified quote service.
+      // Until that service is configured, the API returns 503 and this branch is never reached.
+      if (!isDryRun) {
+        const transaction = data.transaction;
+        if (!transaction || transaction.chainId !== 56 || typeof transaction.to !== 'string' || typeof transaction.data !== 'string') {
+          showToast('Live execution paused: verified calldata is unavailable. No signature requested.');
           return;
         }
+        showToast('Verified calldata received. Wallet signing is ready.');
       }
 
       setSuccessBasket(index);
@@ -246,6 +241,15 @@ export default function Page() {
               🔥 Live BSC Mainnet
             </button>
           </div>
+        </div>
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 border-t border-white/10 px-4 py-3 sm:px-6" aria-label="Aggressive execution controls">
+          <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">Execution profile</span>
+          <button onClick={() => setExecutionSpeed('aggressive')} className={`min-h-9 rounded-lg px-3 text-xs font-bold ${executionSpeed === 'aggressive' ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-500 hover:text-white'}`} aria-pressed={executionSpeed === 'aggressive'}>Aggressive · 1s polling</button>
+          <button onClick={() => setExecutionSpeed('guarded')} className={`min-h-9 rounded-lg px-3 text-xs font-bold ${executionSpeed === 'guarded' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-white'}`} aria-pressed={executionSpeed === 'guarded'}>Guarded</button>
+          <label className="flex min-h-9 items-center gap-2 text-xs text-gray-400">Max slippage
+            <input aria-label="Maximum slippage tolerance" type="range" min="0.5" max="3" step="0.1" value={maxSlippage} onChange={(event) => setMaxSlippage(Number(event.target.value))} className="accent-[#F0B90B]" />
+            <span className="w-10 font-bold text-[#F0B90B]">{maxSlippage.toFixed(1)}%</span>
+          </label>
         </div>
         {mobileMenuOpen && (
           <div className="md:hidden border-t border-white/10 px-4 py-3 space-y-1 bg-[#111]">

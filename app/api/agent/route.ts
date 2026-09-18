@@ -35,23 +35,21 @@ export async function POST(request: Request) {
       });
     }
 
+    // Safe live default: without a configured quote/calldata provider, never invent
+    // calldata or ask a wallet to sign a transaction that has not been quoted.
     return NextResponse.json({
-      status: 'ready_for_signature',
+      status: 'live_execution_unavailable',
       mode: 'LIVE_MAINNET',
       network: 'BSC Mainnet (Chain ID 56)',
       chainId: BSC_CHAIN_ID,
       prompt,
       userAddress,
       targetRouter: PANCAKESWAP_V3_ROUTER,
-      value: '0.0005',
-      transaction: {
-        to: PANCAKESWAP_V3_ROUTER,
-        value: '0x1c6bf52634000',
-        chainId: BSC_CHAIN_ID,
-      },
-      message: 'Wallet signature required. The server never signs or broadcasts on your behalf.',
+      broadcast: false,
+      transaction: null,
+      message: 'Live execution is paused: configure a verified Binance Web3 or PancakeSwap quote endpoint before signing.',
       timestamp: Date.now(),
-    });
+    }, { status: 503 });
   } catch (error) {
     return NextResponse.json(
       { status: 'error', error: error instanceof Error ? error.message : 'Invalid payload' },
