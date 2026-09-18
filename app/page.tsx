@@ -106,9 +106,32 @@ export default function Page() {
     }
   };
 
+  const executeLiveTransaction = async (prompt: string, connectedAddress: string) => {
+    const ethereum = getEthereumProvider();
+    if (!ethereum) throw new Error('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to execute live transactions.');
+    if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
+
+    return await ethereum.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: connectedAddress,
+        to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
+        value: '0x0',
+        data: '0x',
+        chainId: BSC_CHAIN_ID,
+      }],
+    }) as string;
+  };
+
   const handleInvest = async (index: number) => {
     const ethereum = !isDryRun ? getEthereumProvider() : null;
     const connectedAddress = walletAddress;
+
+    if (!isDryRun && (!ethereum || !connectedAddress)) {
+      setSelectedBasket(null);
+      showToast('Connect your wallet to execute on BSC Mainnet.');
+      return;
+    }
 
     // A live modal action is only available after the wallet is already connected.
     // Disconnected users always get the safe simulation path instead.
@@ -120,16 +143,7 @@ export default function Page() {
         if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
 
         const startedAt = performance.now();
-        const txHash = await ethereum.request({
-          method: 'eth_sendTransaction',
-          params: [{
-            from: connectedAddress,
-            to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
-            value: '0x0',
-            data: '0x',
-            chainId: BSC_CHAIN_ID,
-          }],
-        }) as string;
+        const txHash = await executeLiveTransaction(`Execute ${baskets[index].title}`, connectedAddress);
 
         setSuccessBasket(index);
         setReceipt({ txHash, gasUsed: 0, slippage: 0 });
@@ -189,30 +203,25 @@ export default function Page() {
       }
 
       setStrategyStatus(2);
-      const executionResponse = await fetch('/api/agent/execute-basket', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt,
-          basketId: parsed.targetToken === 'bNVDA' ? 'AI & Semiconductors' : parsed.targetToken === 'bTSLA' ? 'Magnificent 7 Tech' : 'Defensive Yield',
-          userAddress: walletAddress,
-          isDryRun,
-          chainId: 56,
-        }),
-      });
-      const result = await executionResponse.json();
-      if (!executionResponse.ok) {
-        if (result.status === 'live_execution_unavailable') {
-          throw new Error('Live execution is unavailable until a verified quote endpoint returns unsigned calldata. No signature was requested.');
-        }
-        throw new Error(result.error ?? 'Strategy execution failed');
+      if (!isDryRun) {
+        if (!walletAddress) throw new Error('Connect your wallet to execute on BSC Mainnet.');
+        const startedAt = performance.now();
+        const txHash = await executeLiveTransaction(prompt, walletAddress);
+        setStrategyStatus(3);
+        setReceipt({ txHash, gasUsed: 0, slippage: 0 });
+        showToast(`Trade broadcast in ${Math.round(performance.now() - startedAt)}ms.`);
+      } else {
+        const executionResponse = await fetch('/api/agent/execute-basket', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, basketId: 'AI & Semiconductors', userAddress: walletAddress, isDryRun: true, chainId: 56 }),
+        });
+        const result = await executionResponse.json();
+        if (!executionResponse.ok) throw new Error(result.error ?? 'Strategy simulation failed');
+        setStrategyStatus(3);
+        setReceipt(result);
+        showToast(`Simulation ready: ${parsed.targetToken} → ${parsed.hedgeAsset}. No gas spent.`);
       }
-
-      setStrategyStatus(3);
-      setReceipt(result);
-      showToast(isDryRun
-        ? `Simulation ready: ${parsed.targetToken} → ${parsed.hedgeAsset}. No gas spent.`
-        : 'Verified transaction payload ready for wallet signing.');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not execute strategy. Please try again.');
     } finally {
@@ -234,13 +243,16 @@ export default function Page() {
 
       <nav className="sticky top-0 z-20 border-b border-white/10 bg-[#090909]/90 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
-          <a href="#top" className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#F0B90B] flex items-center justify-center text-black font-black text-xl shadow-lg shadow-[#F0B90B]/20">E</div>
-            <div>
-              <div className="font-bold tracking-tight">EquiPulse</div>
-              <div className="text-[10px] uppercase tracking-[0.18em] text-[#F0B90B]">Autonomous finance</div>
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <div className="flex shrink-0 items-center rounded-xl border border-white/10 bg-white/[0.04] p-1" aria-label="Execution mode">
+              <button onClick={() => setIsDryRun(true)} className={`min-h-9 rounded-lg px-2 text-[10px] font-bold transition-colors sm:px-3 sm:text-xs ${isDryRun ? 'bg-[#F0B90B] text-black shadow-lg shadow-[#F0B90B]/10' : 'text-gray-400 hover:text-white'}`} aria-pressed={isDryRun} title="Simulates safely with no gas.">⚡ <span className="hidden sm:inline">Simulation</span><span className="sm:hidden">Sim</span></button>
+              <button onClick={() => setIsDryRun(false)} className={`min-h-9 rounded-lg px-2 text-[10px] font-bold transition-colors sm:px-3 sm:text-xs ${!isDryRun ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-400 hover:text-white'}`} aria-pressed={!isDryRun} title="Requests a real BSC Mainnet wallet signature.">🔥 <span className="hidden xs:inline">Live Mainnet</span><span className="xs:hidden">Live</span></button>
             </div>
-          </a>
+            <a href="#top" className="flex min-w-0 items-center gap-2 sm:gap-3">
+              <div className="hidden size-9 shrink-0 rounded-xl bg-[#F0B90B] text-center font-black text-xl leading-9 text-black shadow-lg shadow-[#F0B90B]/20 sm:block">E</div>
+              <div className="min-w-0"><div className="truncate font-bold tracking-tight">EquiPulse</div><div className="hidden text-[10px] uppercase tracking-[0.18em] text-[#F0B90B] sm:block">Autonomous finance</div></div>
+            </a>
+          </div>
           <div className="hidden md:flex items-center gap-8 text-sm text-gray-400">
             <a href="#baskets" className="hover:text-white transition-colors">Baskets</a>
             <a href="#scanner" className="hover:text-white transition-colors">Gap scanner</a>
@@ -253,24 +265,6 @@ export default function Page() {
             </button>
             <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="md:hidden p-2 text-gray-300" aria-label="Toggle menu">
               {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-            </button>
-          </div>
-          <div className="order-3 flex basis-full items-center rounded-xl border border-white/10 bg-white/[0.04] p-1 sm:order-none sm:basis-auto" aria-label="Execution mode">
-            <button
-              onClick={() => setIsDryRun(true)}
-              className={`min-h-10 flex-1 rounded-lg px-3 text-xs font-bold transition-colors sm:flex-none ${isDryRun ? 'bg-[#F0B90B] text-black shadow-lg shadow-[#F0B90B]/10' : 'text-gray-400 hover:text-white'}`}
-              aria-pressed={isDryRun}
-              title="Simulates with the Binance Web3 Transaction API. No gas or broadcast."
-            >
-              ⚡ Dry-Run Simulation
-            </button>
-            <button
-              onClick={() => setIsDryRun(false)}
-              className={`min-h-10 flex-1 rounded-lg px-3 text-xs font-bold transition-colors sm:flex-none ${!isDryRun ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-400 hover:text-white'}`}
-              aria-pressed={!isDryRun}
-              title="Prepares a real BSC Mainnet transaction for wallet signing."
-            >
-              🔥 Live BSC Mainnet
             </button>
           </div>
         </div>
