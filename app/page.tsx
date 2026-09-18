@@ -149,7 +149,7 @@ export default function Page() {
     if (!ethereum) throw new Error('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to execute live transactions.');
     if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
 
-    const quoteResponse = await fetch('/api/agent/route', {
+    const quoteResponse = await fetch('/api/agent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'quote', prompt }),
@@ -215,7 +215,7 @@ export default function Page() {
         return;
       }
 
-      const response = await fetch('/api/agent/execute-basket', {
+      const response = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -266,7 +266,7 @@ export default function Page() {
       return;
     }
     try {
-      const response = await fetch('/api/agent/route', {
+      const response = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -301,10 +301,10 @@ export default function Page() {
     setStrategyLoading(true);
     setStrategyStatus(1);
     try {
-      const parseResponse = await fetch('/api/agent/parse-prompt', {
+      const parseResponse = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ action: 'parse-strategy', prompt }),
       });
       const parsed = await readJsonResponse<{ success?: boolean; suggestion?: string; suggestions?: string[]; targetToken?: string; hedgeAsset?: string }>(parseResponse);
       if (parsed.success !== true) {
@@ -320,7 +320,7 @@ export default function Page() {
         setReceipt({ txHash, gasUsed: 0, slippage: 0 });
         showToast(`Trade broadcast in ${Math.round(performance.now() - startedAt)}ms.`);
       } else {
-        const executionResponse = await fetch('/api/agent/execute-basket', {
+        const executionResponse = await fetch('/api/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt, basketId: 'AI & Semiconductors', userAddress: walletAddress, isDryRun: true, chainId: 56 }),

@@ -20,13 +20,13 @@ async function getBnbUsdPrice() {
       next: { revalidate: 15 },
       signal: AbortSignal.timeout(2500),
     });
-    if (!response.ok) throw new Error('BNB price unavailable');
+    if (!response.ok) throw new Error(`Binance returned HTTP ${response.status}`);
     const data = await response.json();
     const price = Number(data?.price);
-    if (!Number.isFinite(price) || price <= 0) throw new Error('Invalid BNB price');
-    return price;
-  } catch (error) {
-    throw new Error(error instanceof Error ? `Market data unavailable: ${error.message}` : 'Market data unavailable');
+    if (!Number.isFinite(price) || price <= 0) throw new Error('Binance returned an invalid price');
+    return { price, isFallbackPrice: false };
+  } catch {
+    return { price: 580, isFallbackPrice: true };
   }
 }
 
@@ -79,11 +79,31 @@ export async function POST(request: Request) {
       });
     }
 
+    if (body?.action === 'parse-strategy') {
+      const normalizedPrompt = prompt.toLowerCase();
+      return NextResponse.json({
+        status: 'success',
+        success: true,
+        targetToken: normalizedPrompt.includes('ai') ? 'bNVDA' : 'bTSLA',
+        hedgeAsset: normalizedPrompt.includes('yield') || normalizedPrompt.includes('ondo') ? 'Ondo USDY' : 'BNB',
+        action: normalizedPrompt.includes('dca') ? 'dca' : normalizedPrompt.includes('sell') ? 'sell' : 'buy',
+      });
+    }
+
     if (body?.action === 'quote') {
       const usdAmount = parseUsdAmount(prompt);
-      const bnbUsdPrice = await getBnbUsdPrice();
-      const requiredBnb = usdAmount / bnbUsdPrice;
-      return NextResponse.json({ usdAmount, bnbUsdPrice, requiredBnb, gasBufferBnb: 0.00015 });
+      const priceResult = await getBnbUsdPrice();
+      const requiredBnb = usdAmount / priceResult.price;
+      return NextResponse.json({
+        status: 'success',
+        requiredBnb: requiredBnb.toFixed(18),
+        usdAmount,
+        targetRouter: PANCAKESWAP_V3_ROUTER,
+        bnbUsdPrice: priceResult.price,
+        isFallbackPrice: priceResult.isFallbackPrice,
+        gasBufferBnb: '0.00015',
+        transaction: null,
+      });
     }
 
     if (isDryRun) {
