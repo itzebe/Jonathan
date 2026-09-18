@@ -154,15 +154,13 @@ export default function Page() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'quote', prompt }),
     });
-    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: number; gasBufferBnb: number; transaction?: { to: string; data: string; value?: string; chainId: number } }>(quoteResponse);
-    if (!Number.isFinite(quote.requiredBnb) || quote.requiredBnb <= 0) {
-      throw new Error('Quote unavailable. The pricing service returned an invalid order amount. No transaction was submitted.');
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string }>(quoteResponse);
+    const requiredBnb = Number(quote.requiredBnb);
+    if (!Number.isFinite(requiredBnb) || requiredBnb <= 0) {
+      throw new Error('Market data returned an invalid amount.');
     }
-    if (!quote.transaction || quote.transaction.chainId !== 56 || !quote.transaction.to || !quote.transaction.data) {
-      throw new Error('Quote unavailable. No verified BSC transaction calldata was returned. No transaction was submitted.');
-    }
-    const requiredWei = decimalToWei(quote.requiredBnb);
-    const gasBufferWei = decimalToWei(quote.gasBufferBnb);
+    const requiredWei = decimalToWei(requiredBnb);
+    const gasBufferWei = decimalToWei(Number(quote.gasBufferBnb));
     const balanceHex = await ethereum.request({
       method: 'eth_getBalance',
       params: [connectedAddress, 'latest'],
@@ -178,7 +176,7 @@ export default function Page() {
       method: 'eth_sendTransaction',
       params: [{
         from: connectedAddress,
-        to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
+        to: quote.targetRouter,
         value: `0x${requiredWei.toString(16)}`,
         data: '0x',
         chainId: BSC_CHAIN_ID,
@@ -245,8 +243,8 @@ export default function Page() {
         showToast('Wrong network. This application requires BNB Smart Chain Mainnet.');
       } else if (message.includes('insufficient')) {
         showToast(rawMessage);
-      } else if (message.includes('quote') || message.includes('market')) {
-        showToast(`Quote unavailable. ${rawMessage}`);
+      } else if (message.includes('market')) {
+        showToast(`Market data unavailable. ${rawMessage}`);
       } else {
         showToast(`Transaction failed. ${rawMessage}`);
       }
