@@ -40,8 +40,12 @@ export function DXDrawer() {
       const startedAt = performance.now();
       try {
         const response = await fetch('/api/agent/dx-metrics', { cache: 'no-store' });
+        const contentType = response.headers.get('content-type') ?? '';
+        if (!contentType.includes('application/json')) {
+          throw new Error('API endpoint returned an invalid response. Please check route configuration.');
+        }
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error ?? 'Metrics unavailable');
+        if (!response.ok) throw new Error(data.message ?? data.error ?? 'Metrics unavailable');
         if (cancelled) return;
         setMetrics({
           latency: data.latencyMs ?? 142,
