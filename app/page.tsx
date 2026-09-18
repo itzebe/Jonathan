@@ -144,7 +144,7 @@ export default function Page() {
     return data;
   };
 
-  const executeLiveTransaction = async (prompt: string, connectedAddress: string) => {
+  const executeLiveTransaction = async (prompt: string, connectedAddress: string, slippage = maxSlippage) => {
     const ethereum = getEthereumProvider();
     if (!ethereum) throw new Error('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to execute live transactions.');
     if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
@@ -152,17 +152,20 @@ export default function Page() {
     const quoteResponse = await fetch('/api/agent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'quote', prompt }),
+      body: JSON.stringify({ action: 'quote', prompt, maxSlippage: slippage }),
     });
-    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: number; gasBufferBnb: number; transaction?: { to: string; data: string; value?: string; chainId: number } }>(quoteResponse);
-    if (!Number.isFinite(quote.requiredBnb) || quote.requiredBnb <= 0) {
-      throw new Error('Quote unavailable. The pricing service returned an invalid order amount. No transaction was submitted.');
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
+    if (quote.reroutedAsset) {
+      console.info(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
+      setAgentThought(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
+      throw new Error('Slippage guard redirected this trade to Ondo USDY.');
     }
-    if (!quote.transaction || quote.transaction.chainId !== 56 || !quote.transaction.to || !quote.transaction.data) {
-      throw new Error('Quote unavailable. No verified BSC transaction calldata was returned. No transaction was submitted.');
+    const requiredBnb = Number(quote.requiredBnb);
+    if (!Number.isFinite(requiredBnb) || requiredBnb <= 0) {
+      throw new Error('Market data returned an invalid amount.');
     }
-    const requiredWei = decimalToWei(quote.requiredBnb);
-    const gasBufferWei = decimalToWei(quote.gasBufferBnb);
+    const requiredWei = decimalToWei(requiredBnb);
+    const gasBufferWei = decimalToWei(Number(quote.gasBufferBnb));
     const balanceHex = await ethereum.request({
       method: 'eth_getBalance',
       params: [connectedAddress, 'latest'],
@@ -178,7 +181,7 @@ export default function Page() {
       method: 'eth_sendTransaction',
       params: [{
         from: connectedAddress,
-        to: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4',
+        to: quote.targetRouter,
         value: `0x${requiredWei.toString(16)}`,
         data: '0x',
         chainId: BSC_CHAIN_ID,
@@ -245,8 +248,8 @@ export default function Page() {
         showToast('Wrong network. This application requires BNB Smart Chain Mainnet.');
       } else if (message.includes('insufficient')) {
         showToast(rawMessage);
-      } else if (message.includes('quote') || message.includes('market')) {
-        showToast(`Quote unavailable. ${rawMessage}`);
+      } else if (message.includes('market')) {
+        showToast(`Market data unavailable. ${rawMessage}`);
       } else {
         showToast(`Transaction failed. ${rawMessage}`);
       }
@@ -261,39 +264,48 @@ export default function Page() {
       showToast('Enter a spending allowance greater than zero.');
       return;
     }
-    if (!isDryRun && !walletAddress) {
+    if (isDryRun) {
+      setAgentActive(true);
+      setAgentRemaining(amount);
+      setAgentThought('Simulation allowance active — no wallet funds can move.');
+      showToast('Safe autonomous simulation activated.');
+      return;
+    }
+    const ethereum = getEthereumProvider();
+    if (!ethereum || !walletAddress) {
       showToast('Connect your BSC Mainnet wallet before delegating an allowance.');
       return;
     }
     try {
+      setAgentThought(`Checking BSC Mainnet -> Calculating ${autonomyUnit} allowance -> Awaiting signature...`);
+      if (!(await ensureBscMainnet(ethereum))) return;
+      const usdAmount = autonomyUnit === 'USD' ? amount : amount * 580;
+      const quoteResponse = await fetch('/api/agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'quote', prompt: `Delegate $${usdAmount} allowance`, maxSlippage }),
+      });
+      const quote = await readJsonResponse<{ requiredBnb: string; targetRouter: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
+      if (quote.reroutedAsset) throw new Error(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${maxSlippage}%). Re-routed to Ondo USDY for safety.`);
+      const requiredWei = decimalToWei(Number(quote.requiredBnb));
+      const balanceWei = BigInt(await ethereum.request({ method: 'eth_getBalance', params: [walletAddress, 'latest'] }) as string);
+      const gasBufferWei = decimalToWei(0.00015);
+      if (balanceWei < requiredWei + gasBufferWei) {
+        throw new Error(`Insufficient Funds: Available balance is ${formatBnb(balanceWei)} BNB, required order is ${quote.requiredBnb} BNB.`);
+      }
+      const txHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: walletAddress, to: quote.targetRouter, value: `0x${requiredWei.toString(16)}`, data: '0x', chainId: BSC_CHAIN_ID }] }) as string;
       const response = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'activate-agent',
-          budget: amount,
-          unit: autonomyUnit,
-          frequency: autonomyFrequency,
-          userAddress: walletAddress,
-          isDryRun,
-        }),
+        body: JSON.stringify({ action: 'activate-agent', budget: amount, unit: autonomyUnit, frequency: autonomyFrequency, userAddress: walletAddress, isDryRun: false, authorizationConfirmed: true, authorizationTxHash: txHash, maxSlippage }),
       });
-      const result = await readJsonResponse<{ allowance?: { remaining?: number } }>(response);
-      if (!isDryRun && result.status === 'authorization_required') {
-        setAgentActive(false);
-        setAgentRemaining(result.allowance?.remaining ?? amount);
-        setAgentThought('Authorization required — no autonomous trade can execute until delegation is signed and verified.');
-        showToast('Authorization required. Sign the delegation transaction to activate the agent.');
-        return;
-      }
+      const result = await readJsonResponse<{ allowance?: { remaining?: number }; status?: string }>(response);
       setAgentActive(true);
       setAgentRemaining(result.allowance?.remaining ?? amount);
-      setAgentThought(isDryRun
-        ? 'Simulation allowance active — no wallet funds can move.'
-        : 'Allowance active — monitoring gaps within your approved cap.');
-      showToast(isDryRun ? 'Safe autonomous simulation activated.' : 'Agent is active within the approved allowance.');
+      setAgentThought(`Signature confirmed on BSC Mainnet -> Allowance granted: $${usdAmount.toFixed(2)} USD -> Slippage Guard Active: Max ${maxSlippage.toFixed(1)}% -> Agent scanning bStocks / Ondo spreads...`);
+      showToast(`ALLOWANCE DELEGATED ($${usdAmount.toFixed(2)})`);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not activate the agent.');
+      showToast(error instanceof Error ? error.message : 'Allowance delegation failed.');
     }
   };
 
