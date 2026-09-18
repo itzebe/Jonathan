@@ -1,8 +1,31 @@
 import { NextResponse } from 'next/server';
+import { encodeFunctionData } from 'viem';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const BSC_CHAIN_ID = 56;
-const PANCAKESWAP_V3_ROUTER = '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4';
+const PANCAKESWAP_V3_ROUTER = '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4' as const;
+const WBNB_ADDRESS = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c' as const;
+const BSC_TOKENS = {
+  btsla: '0x3b03f0d4dd21f8a7e0e7a2b9d3b4334f59e9c3e2',
+  baapl: '0x4902c5ebc598265ed2212b559b042de8a5eeec3f',
+  ondo: '0x5b15b1b860023714a5b6710ab31e33d3c8c7d8bf',
+} as const;
+
+const PANCAKE_V3_ABI = [{
+  name: 'exactInputSingle',
+  type: 'function',
+  stateMutability: 'payable',
+  inputs: [{ name: 'params', type: 'tuple', components: [
+    { name: 'tokenIn', type: 'address' },
+    { name: 'tokenOut', type: 'address' },
+    { name: 'fee', type: 'uint24' },
+    { name: 'recipient', type: 'address' },
+    { name: 'amountIn', type: 'uint256' },
+    { name: 'amountOutMinimum', type: 'uint256' },
+    { name: 'sqrtPriceLimitX96', type: 'uint160' },
+  ] }],
+  outputs: [{ name: 'amountOut', type: 'uint256' }],
+}] as const;
 
 function safeAddress(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : ZERO_ADDRESS;
@@ -27,6 +50,47 @@ async function getBnbUsdPrice() {
     return { price, isFallbackPrice: false };
   } catch {
     return { price: 580, isFallbackPrice: true };
+  }
+}
+
+async function getBinanceWeb3MinimumOutput({
+  tokenOut,
+  amountIn,
+  userWalletAddress,
+}: {
+  tokenOut: `0x${string}`;
+  amountIn: bigint;
+  userWalletAddress: `0x${string}`;
+}) {
+  const params = new URLSearchParams({
+    binanceChainId: String(BSC_CHAIN_ID),
+    fromTokenAddress: WBNB_ADDRESS,
+    toTokenAddress: tokenOut,
+    amount: amountIn.toString(),
+    userWalletAddress,
+  });
+
+  try {
+    const response = await fetch(`https://web3.binance.com/api/v1/dex/aggregator/quote?${params.toString()}`, {
+      signal: AbortSignal.timeout(3000),
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!response.ok || !contentType.includes('application/json')) throw new Error('Binance Web3 quote unavailable');
+    const payload = await response.json() as { data?: { toTokenMinAmount?: string | number }; toTokenMinAmount?: string | number };
+    const rawMinimum = payload.data?.toTokenMinAmount ?? payload.toTokenMinAmount;
+    if (rawMinimum === undefined || rawMinimum === null || !/^\\d+(?:\\.\\d+)?$/.test(String(rawMinimum))) {
+      throw new Error('Binance Web3 quote returned no minimum output');
+    }
+    return { amountOutMinimum: BigInt(String(rawMinimum)), source: 'binance-web3' as const };
+  } catch {
+    // The token decimals are not available from the fallback input, so retain a
+    // conservative 0.5% bound in the amount domain supplied by the quote request.
+    return {
+      amountOutMinimum: (amountIn * 995n) / 1000n,
+      source: 'fallback-0.5-percent' as const,
+    };
   }
 }
 
@@ -99,6 +163,31 @@ export async function POST(request: Request) {
         : parseUsdAmount(prompt);
       const priceResult = await getBnbUsdPrice();
       const requiredBnb = usdAmount / priceResult.price;
+      const amountIn = BigInt(Math.floor(requiredBnb * 1e18));
+      const selectedToken = prompt.includes('ondo') || prompt.includes('yield')
+        ? BSC_TOKENS.ondo
+        : prompt.includes('aapl') || prompt.includes('apple')
+          ? BSC_TOKENS.baapl
+          : BSC_TOKENS.btsla;
+      const recipient = /^0x[a-fA-F0-9]{40}$/.test(userAddress) ? userAddress as `0x${string}` : ZERO_ADDRESS as `0x${string}`;
+      const minimumOutput = await getBinanceWeb3MinimumOutput({
+        tokenOut: selectedToken,
+        amountIn,
+        userWalletAddress: recipient,
+      });
+      const calldata = encodeFunctionData({
+        abi: PANCAKE_V3_ABI,
+        functionName: 'exactInputSingle',
+        args: [{
+          tokenIn: WBNB_ADDRESS,
+          tokenOut: selectedToken,
+          fee: 3000,
+          recipient,
+          amountIn,
+          amountOutMinimum: minimumOutput.amountOutMinimum,
+          sqrtPriceLimitX96: 0n,
+        }],
+      });
       const maxSlippage = Number(body?.maxSlippage);
       const calculatedSlippage = 0.92;
       const reroutedAsset = Number.isFinite(maxSlippage) && calculatedSlippage > maxSlippage ? 'Ondo USDY' : undefined;
@@ -112,6 +201,9 @@ export async function POST(request: Request) {
         requiredBnb: requiredBnb.toFixed(18),
         usdAmount,
         targetRouter: PANCAKESWAP_V3_ROUTER,
+        calldata,
+        amountOutMinimum: minimumOutput.amountOutMinimum.toString(),
+        quoteSource: minimumOutput.source,
         bnbUsdPrice: priceResult.price,
         isFallbackPrice: priceResult.isFallbackPrice,
         calculatedSlippage,
