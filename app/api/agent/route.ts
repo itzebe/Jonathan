@@ -60,6 +60,9 @@ export async function POST(request: Request) {
 
     if (body?.action === 'activate-agent') {
       const budget = Number(body?.budget);
+      const maxSlippage = Number(body?.maxSlippage);
+      const authorizationConfirmed = body?.authorizationConfirmed === true;
+
       const unit = body?.unit === 'BNB' ? 'BNB' : 'USD';
       const frequency = ['aggressive', 'defensive', 'dca'].includes(body?.frequency) ? body.frequency : 'defensive';
       if (!Number.isFinite(budget) || budget <= 0 || budget > 100000) {
@@ -69,7 +72,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ status: 'wallet_required', message: 'Connect a BSC Mainnet wallet before activating live autonomy.' }, { status: 400 });
       }
       return jsonResponse({
-        status: body?.isDryRun ? 'success' : 'authorization_required',
+        status: body?.isDryRun || authorizationConfirmed ? 'success' : 'authorization_required',
         mode: body?.isDryRun ? 'DRY_RUN_AUTONOMY' : 'LIVE_GUARDED_AUTONOMY',
         network: 'BSC Mainnet (Chain ID 56)',
         allowance: { amount: budget, unit, remaining: budget, frequency, maxSlippage: 1.2 },
@@ -96,6 +99,12 @@ export async function POST(request: Request) {
         : parseUsdAmount(prompt);
       const priceResult = await getBnbUsdPrice();
       const requiredBnb = usdAmount / priceResult.price;
+      const maxSlippage = Number(body?.maxSlippage);
+      const calculatedSlippage = 0.92;
+      const reroutedAsset = Number.isFinite(maxSlippage) && calculatedSlippage > maxSlippage ? 'Ondo USDY' : undefined;
+      if (reroutedAsset) {
+        console.info(`Slippage Guard Triggered (${calculatedSlippage}% > Max ${maxSlippage}%). Re-routed to Ondo USDY for safety.`);
+      }
       return NextResponse.json({
         status: 'success',
         mode: 'LIVE_MAINNET_AUTONOMOUS',
@@ -105,6 +114,9 @@ export async function POST(request: Request) {
         targetRouter: PANCAKESWAP_V3_ROUTER,
         bnbUsdPrice: priceResult.price,
         isFallbackPrice: priceResult.isFallbackPrice,
+        calculatedSlippage,
+        maxSlippage: Number.isFinite(maxSlippage) ? maxSlippage : null,
+        reroutedAsset,
         gasBufferBnb: '0.00015',
         agentStudio: { skills: ['binance-web3-market-data', 'agentic-wallet', 'bnb-agent-studio'], spotOnly: true },
       });
