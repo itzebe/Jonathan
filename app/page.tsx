@@ -117,7 +117,7 @@ export default function Page() {
         const response = await fetch('/api/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'quote', prompt: 'Scan bTSLA bAAPL and Ondo price gaps on BSC Mainnet', maxSlippage }),
+          body: JSON.stringify({ action: 'quote', prompt: 'Scan bTSLA bAAPL and Ondo price gaps on BSC Mainnet', ...(walletAddress ? { userAddress: String(walletAddress) } : {}), maxSlippage }),
         });
         const result = await readJsonResponse<{ calculatedSlippage?: number; reroutedAsset?: string; requiredBnb?: string; quoteResponseMs?: number; maxSlippagePercent?: number; gasBufferBnb?: string }>(response);
         if (cancelled) return;
@@ -139,7 +139,7 @@ export default function Page() {
     scan();
     const timer = window.setInterval(scan, intervalMs);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [agentActive, isDryRun, autonomyFrequency, maxSlippage]);
+  }, [agentActive, isDryRun, autonomyFrequency, maxSlippage, walletAddress]);
 
   useEffect(() => {
     window.localStorage.setItem('maxSlippage', String(maxSlippage));
@@ -228,7 +228,7 @@ export default function Page() {
     const quoteResponse = await fetch('/api/agent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'quote', prompt, maxSlippage: slippage }),
+      body: JSON.stringify({ action: 'quote', prompt, userAddress: String(connectedAddress), maxSlippage: slippage }),
     });
     const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string; quoteResponseMs?: number; maxSlippagePercent?: number }>(quoteResponse);
     recordDecision({
@@ -363,9 +363,20 @@ export default function Page() {
       return;
     }
     const ethereum = getEthereumProvider();
-    if (!ethereum || !walletAddress) {
-      showToast('Connect your BSC Mainnet wallet before delegating an allowance.');
+    if (!ethereum) {
+      showToast('Install MetaMask, Binance Web3 Wallet, or Trust Wallet to delegate a live allowance.');
       return;
+    }
+    // Wallet not connected: automatically trigger the connect flow before activating,
+    // rather than bailing out with an error. This is the "Connect Wallet to Activate" path.
+    let connectedAddress = walletAddress;
+    if (!connectedAddress) {
+      setAgentThought('Connect Wallet to Activate -> Opening wallet to authorize BSC Mainnet allowance...');
+      connectedAddress = await connectWallet();
+      if (!connectedAddress) {
+        showToast('Connect your BSC Mainnet wallet to activate the agent.');
+        return;
+      }
     }
     try {
       setAgentThought(`Checking BSC Mainnet -> Calculating ${autonomyUnit} allowance -> Awaiting signature...`);
@@ -374,17 +385,17 @@ export default function Page() {
       const quoteResponse = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'quote', prompt: `Delegate $${usdAmount} allowance`, maxSlippage }),
+        body: JSON.stringify({ action: 'quote', prompt: `Delegate $${usdAmount} allowance`, userAddress: String(connectedAddress), maxSlippage }),
       });
       const quote = await readJsonResponse<{ requiredBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
       if (quote.reroutedAsset) throw new Error(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${maxSlippage}%). Re-routed to Ondo USDY for safety.`);
       const requiredWei = decimalToWei(Number(quote.requiredBnb));
-      const balanceWei = BigInt(await ethereum.request({ method: 'eth_getBalance', params: [walletAddress, 'latest'] }) as string);
+      const balanceWei = BigInt(await ethereum.request({ method: 'eth_getBalance', params: [connectedAddress, 'latest'] }) as string);
       const gasBufferWei = decimalToWei(0.00015);
       if (balanceWei < requiredWei + gasBufferWei) {
         throw new Error(`Insufficient Funds: Available balance is ${formatBnb(balanceWei)} BNB, required order is ${quote.requiredBnb} BNB.`);
       }
-      const txHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: walletAddress, to: quote.targetRouter, value: `0x${requiredWei.toString(16)}`, data: quote.calldata, chainId: BSC_CHAIN_ID }] }) as string;
+      const txHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: connectedAddress, to: quote.targetRouter, value: `0x${requiredWei.toString(16)}`, data: quote.calldata, chainId: BSC_CHAIN_ID }] }) as string;
       setActiveTxHash(txHash);
       window.localStorage.setItem('activeTxHash', txHash);
       window.localStorage.setItem('userAllowanceUsd', `$${usdAmount.toFixed(2)}`);
@@ -394,7 +405,7 @@ export default function Page() {
       const response = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'activate-agent', budget: amount, unit: autonomyUnit, frequency: autonomyFrequency, userAddress: walletAddress, isDryRun: false, authorizationConfirmed: true, authorizationTxHash: txHash, maxSlippage }),
+        body: JSON.stringify({ action: 'activate-agent', budget: amount, unit: autonomyUnit, frequency: autonomyFrequency, userAddress: String(connectedAddress), isDryRun: false, authorizationConfirmed: true, authorizationTxHash: txHash, maxSlippage }),
       });
       const result = await readJsonResponse<{ allowance?: { remaining?: number }; status?: string }>(response);
       setAgentActive(true);
