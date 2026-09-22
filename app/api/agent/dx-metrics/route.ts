@@ -105,7 +105,10 @@ export async function GET() {
     const jsonExport = JSON.stringify(metricsData, null, 2);
     const csvExport = `Metric,Value\nTimestamp,${metricsData.timestamp}\nLatency (ms),${latency}\nExecution Slippage (%),${executionSlippage}\nLiquidity Depth (USD),${liquidityDepthUsd}\nTime to First Call (ms),${timeToFirstCall}\nPlatform Friction (%),${platformFriction}\nAPI Calls,${apiCalls}\nHealth Status,${healthStatus}`;
 
-    const response: DXMetricsResponse = {
+    const response: DXMetricsResponse & { isLive: boolean; dataSource: string; note: string } = {
+      isLive: false,
+      dataSource: 'sample',
+      note: 'Market telemetry (slippage, liquidity, TTFC, friction, gas, quote time) is sample/estimated. Live market data sources are not connected in this deployment.',
       timestamp: new Date().toISOString(),
       network: 'BSC Mainnet',
       chainId: 56,

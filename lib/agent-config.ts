@@ -37,6 +37,24 @@ export const CONTRACTS = {
   ondo: '0x5b15b1b860023714a5b6710ab31e33d3c8c7d8bf',
 } as const;
 
+// --- Live tradability gate ------------------------------------------------------------------
+//
+// On-chain verification (BSC Mainnet, eth_getCode) shows the tokenized-stock addresses in
+// CONTRACTS are NOT live, pool-backed ERC-20 tokens:
+//   - btsla (0x3b03…) -> empty bytecode (0x): no contract deployed
+//   - ondo  (0x5b15…) -> empty bytecode (0x): no contract deployed
+//   - baapl (0x4902…) -> ~283-byte stub, not a real tokenized-stock ERC-20
+// In addition, the authenticated Binance Web3 aggregator quote endpoint is not reachable and
+// no BINANCE_WEB3_API_KEY is configured, so a trustworthy on-chain minimum-output cannot be
+// derived. Signing a swap against these addresses would be guaranteed to revert and would burn
+// real gas while enforcing a meaningless slippage bound.
+//
+// Until real, pool-backed token contracts AND a working authenticated quote provider are
+// configured, the product stays in verified-simulation mode and the server refuses to emit
+// signable calldata for live execution. Flip TOKENS_VERIFIED to true only after replacing the
+// CONTRACTS token addresses with on-chain-verified tokens that have PancakeSwap V3 liquidity.
+export const TOKENS_VERIFIED = false;
+
 // --- Hackathon trading policy ---------------------------------------------------------------
 
 export const TRADING_POLICY = {
@@ -60,6 +78,19 @@ export const agentCapabilities = {
   /** Binance Web3 Transaction API key available for authenticated quotes/routing. */
   hasBinanceWeb3: hasEnv('BINANCE_WEB3_API_KEY'),
 } as const;
+
+/**
+ * Whether a real, signable live swap can be produced in this deployment. Requires BOTH
+ * on-chain-verified, pool-backed token contracts AND an authenticated quote provider so the
+ * amountOutMinimum reflects a trustworthy on-chain quote. When false, the API refuses to emit
+ * calldata for the user's wallet to sign and the product operates in verified-simulation mode.
+ */
+export function isLiveTradingConfigured(): boolean {
+  return TOKENS_VERIFIED && agentCapabilities.hasBinanceWeb3;
+}
+
+export const LIVE_TRADING_UNAVAILABLE_REASON =
+  'Live execution is disabled in this deployment: the tokenized-stock contracts are not verified on-chain and no authenticated quote provider is configured. Trades run in verified-simulation mode only — no funds move.';
 
 // --- Secret accessors (call only inside server code; never log the return value) ------------
 
@@ -95,5 +126,7 @@ export function publicAgentStatus() {
     maxSlippagePercent: Number(TRADING_POLICY.maxSlippageBps) / 100,
     router: CONTRACTS.pancakeV3Router,
     capabilities: agentCapabilities,
+    tokensVerified: TOKENS_VERIFIED,
+    liveTradingConfigured: isLiveTradingConfigured(),
   };
 }

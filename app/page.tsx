@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 type EthereumProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
   on?: (event: string, handler: (...args: unknown[]) => void) => void;
+  removeListener?: (event: string, handler: (...args: unknown[]) => void) => void;
 };
 
 const BSC_CHAIN_ID = '0x38';
@@ -27,7 +28,36 @@ function formatBnb(wei: bigint) {
   return Number(wei) / 1e18 < 0.000001
     ? (Number(wei) / 1e18).toExponential(3)
     : (Number(wei) / 1e18).toFixed(6);
-} 
+}
+
+type ConfirmedReceipt = { txHash: string; gasUsedWei: bigint; status: 'success' | 'reverted' };
+
+/**
+ * Polls eth_getTransactionReceipt until the transaction is mined, then reports the REAL
+ * on-chain outcome. A broadcast tx hash alone does not mean the trade succeeded — the swap can
+ * still revert on-chain. We only report success when the receipt status is 0x1, and surface a
+ * clear failure otherwise. Never treat a pending/unknown receipt as a success.
+ */
+async function waitForTransactionReceipt(
+  ethereum: EthereumProvider,
+  txHash: string,
+  { timeoutMs = 120000, intervalMs = 3000 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<ConfirmedReceipt> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const receipt = (await ethereum.request({
+      method: 'eth_getTransactionReceipt',
+      params: [txHash],
+    })) as { status?: string; gasUsed?: string } | null;
+    if (receipt) {
+      const gasUsedWei = receipt.gasUsed ? BigInt(receipt.gasUsed) : 0n;
+      const status = receipt.status === '0x1' ? 'success' : 'reverted';
+      return { txHash, gasUsedWei, status };
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('Transaction confirmation timed out. Check the hash on BscScan before retrying.');
+}
 import { Activity, ArrowUpRight, Bot, CheckCircle2, Code2, ExternalLink, Menu, ShieldCheck, Sparkles, Wallet, X, LockKeyhole, Gauge, CircleAlert } from 'lucide-react';
 import { StatusHeader } from '@/components/status-header';
 import { BasketCard } from '@/components/basket-card';
@@ -99,7 +129,7 @@ export default function Page() {
         setAutonomyUnit('USD');
         setAgentRemaining(amount);
         setAgentActive(savedAgentActive || Boolean(savedAllowance));
-        setAgentThought('BSC Mainnet connected -> Allowance restored -> Agent is scanning bTSLA / bAAPL / Ondo spreads...');
+        setAgentThought('In-browser monitor restored. Watching sample market data while this tab is open — no autonomous signing or execution is configured.');
       }
     }
     if (savedMode && ['aggressive', 'defensive', 'dca'].includes(savedMode)) setAutonomyFrequency(savedMode);
@@ -127,13 +157,10 @@ export default function Page() {
           gasBnb: Number(result.gasBufferBnb) || null,
           slippagePercent: result.maxSlippagePercent ?? maxSlippage,
         });
-        if (result.reroutedAsset) {
-          setAgentThought(`Trade Paused: On-chain slippage (${result.calculatedSlippage}% ) exceeded your limit (${maxSlippage}%). Routed to Ondo USDY.`.replace('% )', '%'));
-        } else {
-          setAgentThought(`BSC Mainnet scan complete -> bTSLA / bAAPL / Ondo spreads checked -> Slippage ${result.calculatedSlippage ?? 0}% within ${maxSlippage}% limit -> Monitoring...`);
-        }
+        const stamp = new Date().toLocaleTimeString();
+        setAgentThought(`In-browser monitor active (${stamp}). Live execution is not configured, so no trade is signed or broadcast. Slippage cap for previews: ${maxSlippage}%.`);
       } catch (error) {
-        if (!cancelled) setAgentThought(`BSC Mainnet scan paused: ${error instanceof Error ? error.message : 'market data unavailable'}`);
+        if (!cancelled) setAgentThought(`In-browser monitor paused: ${error instanceof Error ? error.message : 'market data unavailable'}`);
       }
     };
     scan();
@@ -144,6 +171,47 @@ export default function Page() {
   useEffect(() => {
     window.localStorage.setItem('maxSlippage', String(maxSlippage));
   }, [maxSlippage]);
+
+  // Reflect the real wallet state: silently restore an already-authorized account on mount, and
+  // react to account switches, disconnects, and network changes coming from the wallet itself.
+  useEffect(() => {
+    const ethereum = getEthereumProvider();
+    if (!ethereum) return;
+
+    (async () => {
+      try {
+        const accounts = (await ethereum.request({ method: 'eth_accounts' })) as string[];
+        if (accounts?.length) setWalletAddress(accounts[0]);
+      } catch {
+        // eth_accounts can reject if the wallet is locked; treat as disconnected.
+      }
+    })();
+
+    const handleAccountsChanged = (...args: unknown[]) => {
+      const accounts = args[0] as string[] | undefined;
+      if (!accounts || accounts.length === 0) {
+        setWalletAddress(null);
+        showToast('Wallet disconnected.');
+        return;
+      }
+      setWalletAddress(accounts[0]);
+      showToast(`Account switched: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`);
+    };
+
+    const handleChainChanged = (...args: unknown[]) => {
+      const chainId = args[0] as string | undefined;
+      if (chainId && chainId !== BSC_CHAIN_ID) {
+        showToast('Wrong network. Switch your wallet to BSC Mainnet (Chain ID 56).');
+      }
+    };
+
+    ethereum.on?.('accountsChanged', handleAccountsChanged);
+    ethereum.on?.('chainChanged', handleChainChanged);
+    return () => {
+      ethereum.removeListener?.('accountsChanged', handleAccountsChanged);
+      ethereum.removeListener?.('chainChanged', handleChainChanged);
+    };
+  }, []);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -230,13 +298,19 @@ export default function Page() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'quote', prompt, userAddress: String(connectedAddress), maxSlippage: slippage }),
     });
-    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string; quoteResponseMs?: number; maxSlippagePercent?: number }>(quoteResponse);
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; executable?: boolean; executableReason?: string | null; calculatedSlippage?: number; reroutedAsset?: string; quoteResponseMs?: number; maxSlippagePercent?: number }>(quoteResponse);
     recordDecision({
       decisionLatencyMs: performance.now() - decisionStartedAt,
       quoteResponseMs: quote.quoteResponseMs ?? null,
       gasBnb: Number(quote.gasBufferBnb) || null,
       slippagePercent: quote.maxSlippagePercent ?? slippage,
     });
+    // Live-execution safety gate: the server only marks a quote executable when this deployment
+    // is genuinely configured for live trading (verified tokens + authenticated quote provider).
+    // Refuse to broadcast otherwise so we never burn real gas on a guaranteed-revert swap.
+    if (quote.executable !== true) {
+      throw new Error(quote.executableReason || 'Live execution is not configured for this deployment. Switch to Simulation to preview trades safely.');
+    }
     if (quote.reroutedAsset) {
       console.info(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
       setAgentThought(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${slippage}%). Re-routed to Ondo USDY for safety.`);
@@ -271,14 +345,21 @@ export default function Page() {
         gas: `0x${BigInt(350000).toString(16)}`,
       }],
     }) as string;
+
+    // Wait for the real on-chain receipt. Only a status 0x1 receipt is a successful trade.
+    const confirmed = await waitForTransactionReceipt(ethereum, txHash);
+    if (confirmed.status === 'reverted') {
+      recordTransaction({ txHash, label: prompt, gasUsedBnb: Number(confirmed.gasUsedWei) / 1e18, slippagePercent: quote.maxSlippagePercent ?? slippage, mode: 'live' });
+      throw new Error(`Transaction reverted on-chain. No swap occurred. View details: ${txHash.slice(0, 10)}...${txHash.slice(-8)}`);
+    }
     recordTransaction({
       txHash,
       label: prompt,
-      gasUsedBnb: Number(quote.gasBufferBnb) || 0,
+      gasUsedBnb: Number(confirmed.gasUsedWei) / 1e18,
       slippagePercent: quote.maxSlippagePercent ?? slippage,
       mode: 'live',
     });
-    return txHash;
+    return { txHash, gasUsedBnb: Number(confirmed.gasUsedWei) / 1e18 };
   };
 
   const handleInvest = async (index: number) => {
@@ -300,12 +381,11 @@ export default function Page() {
       if (shouldExecuteLive && ethereum && connectedAddress) {
         if (!(await ensureBscMainnet(ethereum))) throw new Error('BSC Mainnet required');
 
-        const startedAt = performance.now();
-        const txHash = await executeLiveTransaction(`Execute ${baskets[index].title}`, connectedAddress);
+        const { txHash, gasUsedBnb } = await executeLiveTransaction(`Execute ${baskets[index].title}`, connectedAddress);
 
         setSuccessBasket(index);
-        setReceipt({ txHash, gasUsed: 0, slippage: 0 });
-        showToast(`Trade broadcast: ${txHash.slice(0, 10)}...${txHash.slice(-8)} (${Math.round(performance.now() - startedAt)}ms)`);
+        setReceipt({ txHash, gasUsed: gasUsedBnb, slippage: maxSlippage });
+        showToast(`Trade confirmed on-chain: ${txHash.slice(0, 10)}...${txHash.slice(-8)}`);
         setTimeout(() => setSuccessBasket(null), 3000);
         return;
       }
@@ -381,39 +461,39 @@ export default function Page() {
       }
     }
     try {
-      setAgentThought(`Checking BSC Mainnet -> Calculating ${autonomyUnit} allowance -> Awaiting signature...`);
+      setAgentThought(`Checking BSC Mainnet -> Verifying live execution is configured...`);
       if (!(await ensureBscMainnet(ethereum))) return;
       const usdAmount = autonomyUnit === 'USD' ? amount : amount * 580;
+      // Ask the server whether live execution is actually configured. It returns executable:false
+      // in this deployment (tokens unverified + no authenticated quote provider), so we do NOT
+      // broadcast any transaction — that would burn real gas on a guaranteed-revert swap and there
+      // is no server-side signer/worker to run autonomous trades regardless.
       const quoteResponse = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'quote', prompt: `Delegate $${usdAmount} allowance`, userAddress: String(connectedAddress), maxSlippage }),
       });
-      const quote = await readJsonResponse<{ requiredBnb: string; targetRouter: string; calldata: string; calculatedSlippage?: number; reroutedAsset?: string }>(quoteResponse);
-      if (quote.reroutedAsset) throw new Error(`Slippage Guard Triggered (${quote.calculatedSlippage}% > Max ${maxSlippage}%). Re-routed to Ondo USDY for safety.`);
-      const requiredWei = decimalToWei(Number(quote.requiredBnb));
-      const balanceWei = BigInt(await ethereum.request({ method: 'eth_getBalance', params: [connectedAddress, 'latest'] }) as string);
-      const gasBufferWei = decimalToWei(0.00015);
-      if (balanceWei < requiredWei + gasBufferWei) {
-        throw new Error(`Insufficient Funds: Available balance is ${formatBnb(balanceWei)} BNB, required order is ${quote.requiredBnb} BNB.`);
+      const quote = await readJsonResponse<{ executable?: boolean; executableReason?: string | null }>(quoteResponse);
+      if (quote.executable !== true) {
+        // Start the in-browser monitor only. It watches sample market data while this tab is open;
+        // it cannot and does not sign or broadcast any transaction.
+        setAgentActive(true);
+        setAgentRemaining(amount);
+        window.localStorage.setItem('agentActive', 'true');
+        window.localStorage.setItem('agentMode', autonomyFrequency);
+        window.localStorage.setItem('maxSlippage', String(maxSlippage));
+        setAgentThought('Live autonomous execution is NOT configured in this deployment. Started in-browser monitoring only (runs while this tab is open, signs nothing, moves no funds).');
+        showToast(quote.executableReason || 'Live execution not configured. In-browser monitoring started; no funds move.');
+        return;
       }
-      const txHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: connectedAddress, to: quote.targetRouter, value: `0x${requiredWei.toString(16)}`, data: quote.calldata, chainId: BSC_CHAIN_ID, gas: `0x${BigInt(350000).toString(16)}` }] }) as string;
-      setActiveTxHash(txHash);
-      window.localStorage.setItem('activeTxHash', txHash);
-      window.localStorage.setItem('userAllowanceUsd', `$${usdAmount.toFixed(2)}`);
+      // (Reached only when a real signer/verified tokens are configured.)
+      setAgentActive(true);
+      setAgentRemaining(amount);
       window.localStorage.setItem('agentActive', 'true');
       window.localStorage.setItem('agentMode', autonomyFrequency);
       window.localStorage.setItem('maxSlippage', String(maxSlippage));
-      const response = await fetch('/api/agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'activate-agent', budget: amount, unit: autonomyUnit, frequency: autonomyFrequency, userAddress: String(connectedAddress), isDryRun: false, authorizationConfirmed: true, authorizationTxHash: txHash, maxSlippage }),
-      });
-      const result = await readJsonResponse<{ allowance?: { remaining?: number }; status?: string }>(response);
-      setAgentActive(true);
-      setAgentRemaining(result.allowance?.remaining ?? amount);
-      setAgentThought(`Signature confirmed on BSC Mainnet -> Allowance granted: $${usdAmount.toFixed(2)} USD -> Slippage Guard Active: Max ${maxSlippage.toFixed(1)}% -> Agent scanning bStocks / Ondo spreads...`);
-      showToast(`ALLOWANCE DELEGATED ($${usdAmount.toFixed(2)})`);
+      setAgentThought(`Live execution configured -> Slippage guard: Max ${maxSlippage.toFixed(1)}% -> Monitoring bStocks / Ondo spreads...`);
+      showToast(`Agent monitoring activated ($${usdAmount.toFixed(2)} cap).`);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Allowance delegation failed.');
     }
@@ -436,11 +516,10 @@ export default function Page() {
       setStrategyStatus(2);
       if (!isDryRun) {
         if (!walletAddress) throw new Error('Connect your wallet to execute on BSC Mainnet.');
-        const startedAt = performance.now();
-        const txHash = await executeLiveTransaction(prompt, walletAddress);
+        const { txHash, gasUsedBnb } = await executeLiveTransaction(prompt, walletAddress);
         setStrategyStatus(3);
-        setReceipt({ txHash, gasUsed: 0, slippage: 0 });
-        showToast(`Trade broadcast in ${Math.round(performance.now() - startedAt)}ms.`);
+        setReceipt({ txHash, gasUsed: gasUsedBnb, slippage: maxSlippage });
+        showToast(`Trade confirmed on-chain: ${txHash.slice(0, 10)}...${txHash.slice(-8)}`);
       } else {
         const executionResponse = await fetch('/api/agent', {
           method: 'POST',
@@ -511,7 +590,7 @@ export default function Page() {
       <div id="top" className="max-w-7xl mx-auto px-4 sm:px-6 py-10 sm:py-16">
         <section className="grid lg:grid-cols-[1.25fr_.75fr] gap-8 items-end mb-16">
           <div>
-            <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[#F0B90B] mb-5"><span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" /> Agent is watching the market</div>
+            <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[#F0B90B] mb-5"><span className="w-2 h-2 rounded-full bg-[#F0B90B]" /> Verified simulation · in-browser monitor</div>
             <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black tracking-[-0.04em] leading-[0.98] max-w-4xl">Trade the gap.<br /><span className="text-[#F0B90B]">Own the upside.</span></h1>
             <p className="mt-6 text-base sm:text-lg text-gray-400 max-w-2xl leading-relaxed">Tokenized stock baskets with an autonomous agent that finds off-market pricing gaps and executes on BSC while traditional markets sleep.</p>
             <div className="mt-8 flex flex-wrap gap-3">
@@ -522,13 +601,14 @@ export default function Page() {
           <div className="glass-dark rounded-2xl p-5 sm:p-6 border border-[#F0B90B]/20 relative overflow-hidden">
             <div className="absolute -right-10 -top-10 w-36 h-36 rounded-full bg-[#F0B90B]/10 blur-3xl" />
             <div className="relative">
-              <div className="flex items-center justify-between mb-5"><span className="text-xs font-bold uppercase tracking-[0.18em] text-gray-400">Network snapshot</span><span className="text-xs text-green-400 flex items-center gap-1"><span className="w-1.5 h-1.5 bg-green-400 rounded-full" /> Live</span></div>
+              <div className="flex items-center justify-between mb-5"><span className="text-xs font-bold uppercase tracking-[0.18em] text-gray-400">Network snapshot</span><span className="text-xs text-gray-400 flex items-center gap-1"><span className="w-1.5 h-1.5 bg-gray-500 rounded-full" /> Sample</span></div>
               <div className="grid grid-cols-2 gap-5">
                 <div><div className="text-2xl sm:text-3xl font-bold">$2.84M</div><div className="text-xs text-gray-500 mt-1">Onchain liquidity</div></div>
-                <div><div className="text-2xl sm:text-3xl font-bold text-[#F0B90B]">+1.20%</div><div className="text-xs text-gray-500 mt-1">Largest live gap</div></div>
+                <div><div className="text-2xl sm:text-3xl font-bold text-[#F0B90B]">+1.20%</div><div className="text-xs text-gray-500 mt-1">Largest gap</div></div>
                 <div><div className="text-2xl sm:text-3xl font-bold">142<span className="text-sm font-normal text-gray-500">ms</span></div><div className="text-xs text-gray-500 mt-1">API response</div></div>
                 <div><div className="text-2xl sm:text-3xl font-bold">99.8<span className="text-sm font-normal text-gray-500">%</span></div><div className="text-xs text-gray-500 mt-1">Network uptime</div></div>
               </div>
+              <p className="mt-4 text-[11px] leading-relaxed text-gray-600">Illustrative figures, not a live market feed. Live price and liquidity sources are not connected in this deployment.</p>
             </div>
           </div>
         </section>
@@ -543,19 +623,19 @@ export default function Page() {
         <section id="autonomy" className="mb-16 scroll-mt-24">
           <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div><div className="mb-2 text-xs uppercase tracking-[0.18em] text-[#F0B90B]">Fund delegation</div><h2 className="text-2xl font-bold tracking-tight">Autonomous allowance & risk guard</h2></div>
-            <p className="max-w-md text-sm text-gray-500">Approve a clear cap first. The agent can monitor and act only inside it; every decision still passes budget, balance, and slippage checks.</p>
+            <p className="max-w-md text-sm text-gray-500">Set a spending cap and start the in-browser monitor. It watches sample market data while this tab is open. Live autonomous signing is not enabled in this deployment — no funds move.</p>
           </div>
           <div className="grid gap-5 lg:grid-cols-[1.1fr_.9fr]">
             <div className="glass-dark rounded-2xl border border-[#F0B90B]/20 p-5 sm:p-6">
-              <div className="mb-5 flex items-start justify-between gap-4"><div><div className="flex items-center gap-2 font-bold"><LockKeyhole className="h-4 w-4 text-[#F0B90B]" /> Spending allowance</div><p className="mt-1 text-xs text-gray-500">This is a monitoring authorization, not an unlimited withdrawal.</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${agentActive ? 'bg-green-400/10 text-green-300' : 'bg-white/10 text-gray-500'}`}>{agentActive ? 'AGENT ACTIVE & EXECUTING LIVE' : 'NOT ACTIVE'}</span></div>
+              <div className="mb-5 flex items-start justify-between gap-4"><div><div className="flex items-center gap-2 font-bold"><LockKeyhole className="h-4 w-4 text-[#F0B90B]" /> Spending allowance</div><p className="mt-1 text-xs text-gray-500">This is a monitoring authorization, not an unlimited withdrawal.</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${agentActive ? 'bg-[#F0B90B]/10 text-[#F0B90B]' : 'bg-white/10 text-gray-500'}`}>{agentActive ? 'MONITORING · IN-BROWSER' : 'NOT ACTIVE'}</span></div>
               <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
                 <label className="flex min-h-12 items-center rounded-xl border border-white/10 bg-black/30 px-3"><span className="mr-2 text-gray-500">{autonomyUnit === 'USD' ? '$' : 'BNB'}</span><input aria-label="Autonomous spending allowance" inputMode="decimal" value={autonomyBudget} onChange={(event) => setAutonomyBudget(event.target.value)} className="min-w-0 flex-1 bg-transparent text-lg font-bold outline-none" /></label>
                 <div className="flex rounded-xl border border-white/10 bg-black/30 p-1"><button onClick={() => setAutonomyUnit('USD')} className={`rounded-lg px-3 text-xs font-bold ${autonomyUnit === 'USD' ? 'bg-[#F0B90B] text-black' : 'text-gray-500'}`}>USD</button><button onClick={() => setAutonomyUnit('BNB')} className={`rounded-lg px-3 text-xs font-bold ${autonomyUnit === 'BNB' ? 'bg-[#F0B90B] text-black' : 'text-gray-500'}`}>BNB</button></div>
               </div>
               <div className="mt-4 grid gap-2 sm:grid-cols-3"><button onClick={() => setAutonomyFrequency('aggressive')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'aggressive' ? 'border-red-400/50 bg-red-400/10' : 'border-white/10'}`}><div className="text-xs font-bold">Aggressive</div><div className="mt-1 text-[11px] text-gray-500">Every 5 mins</div></button><button onClick={() => setAutonomyFrequency('defensive')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'defensive' ? 'border-[#F0B90B]/50 bg-[#F0B90B]/10' : 'border-white/10'}`}><div className="text-xs font-bold">Defensive</div><div className="mt-1 text-[11px] text-gray-500">Hourly</div></button><button onClick={() => setAutonomyFrequency('dca')} className={`rounded-xl border p-3 text-left ${autonomyFrequency === 'dca' ? 'border-green-400/50 bg-green-400/10' : 'border-white/10'}`}><div className="text-xs font-bold">DCA</div><div className="mt-1 text-[11px] text-gray-500">Daily</div></button></div>
-              <button onClick={handleActivateAgent} className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#F0B90B] font-bold text-black hover:bg-[#ffd447]"><ShieldCheck className="h-4 w-4" /> {agentActive ? 'AGENT DELEGATED & EXECUTING LIVE' : 'Delegate & activate agent'}</button>
+              <button onClick={handleActivateAgent} className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#F0B90B] font-bold text-black hover:bg-[#ffd447]"><ShieldCheck className="h-4 w-4" /> {agentActive ? 'Monitoring active (this browser)' : 'Activate in-browser monitor'}</button>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 sm:p-6"><div className="mb-5 flex items-center gap-2 font-bold"><Gauge className="h-4 w-4 text-[#F0B90B]" /> Live reasoner console</div><div className="rounded-xl bg-black/40 p-4 font-mono text-xs leading-6 text-gray-400"><div className="text-green-300">● Guardrails online</div><div>{agentThought}</div><div className="mt-2 text-gray-500">Budget remaining: <span className="text-white">{agentRemaining === null ? '—' : `${autonomyUnit === 'USD' ? '$' : ''}${agentRemaining.toFixed(2)}${autonomyUnit === 'BNB' ? ' BNB' : ''}`}</span></div><div className="text-gray-500">Slippage guard: <span className="text-[#F0B90B]">1.2% max</span></div>{agentActive && activeTxHash && <div className="mt-2 text-gray-500">Verified receipt: <a href={`https://bscscan.com/tx/${activeTxHash}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-green-300 underline hover:text-green-200">{`${activeTxHash.slice(0, 10)}...${activeTxHash.slice(-8)}`}<ExternalLink className="h-3 w-3" /></a></div>}</div><div className="mt-4 flex gap-2 text-xs text-gray-500"><CircleAlert className="h-4 w-4 shrink-0 text-[#F0B90B]" /> High slippage automatically pauses the trade and routes attention to stable yield.</div></div>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 sm:p-6"><div className="mb-5 flex items-center gap-2 font-bold"><Gauge className="h-4 w-4 text-[#F0B90B]" /> Live reasoner console</div><div className="rounded-xl bg-black/40 p-4 font-mono text-xs leading-6 text-gray-400"><div className="text-green-300">● Guardrails online</div><div>{agentThought}</div><div className="mt-2 text-gray-500">Budget remaining: <span className="text-white">{agentRemaining === null ? '—' : `${autonomyUnit === 'USD' ? '$' : ''}${agentRemaining.toFixed(2)}${autonomyUnit === 'BNB' ? ' BNB' : ''}`}</span></div><div className="text-gray-500">Slippage guard: <span className="text-[#F0B90B]">{maxSlippage.toFixed(1)}% max</span></div>{agentActive && activeTxHash && <div className="mt-2 text-gray-500">Verified receipt: <a href={`https://bscscan.com/tx/${activeTxHash}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-green-300 underline hover:text-green-200">{`${activeTxHash.slice(0, 10)}...${activeTxHash.slice(-8)}`}<ExternalLink className="h-3 w-3" /></a></div>}</div><div className="mt-4 flex gap-2 text-xs text-gray-500"><CircleAlert className="h-4 w-4 shrink-0 text-[#F0B90B]" /> High slippage automatically pauses the trade and routes attention to stable yield.</div></div>
           </div>
         </section>
 
@@ -573,7 +653,7 @@ export default function Page() {
         </section>
 
         <section id="developer" className="grid sm:grid-cols-3 gap-4 scroll-mt-24">
-          <div className="sm:col-span-2 glass-dark rounded-2xl p-6 border border-white/10"><div className="flex items-center justify-between mb-6"><div><div className="text-xs uppercase tracking-[0.18em] text-[#F0B90B] mb-2">Built for builders</div><h2 className="text-2xl font-bold">Agent-native DX</h2></div><a href="#developer" className="p-2 rounded-lg hover:bg-white/10"><Code2 className="w-5 h-5 text-gray-400" /></a></div><div className="grid grid-cols-2 md:grid-cols-4 gap-4"><div><div className="text-2xl font-bold">47</div><div className="text-xs text-gray-500 mt-1">API calls</div></div><div><div className="text-2xl font-bold text-green-400">0.23%</div><div className="text-xs text-gray-500 mt-1">Avg slippage</div></div><div><div className="text-2xl font-bold text-[#F0B90B]">1.2s</div><div className="text-xs text-gray-500 mt-1">Time to first call</div></div><div><div className="text-2xl font-bold">3.2%</div><div className="text-xs text-gray-500 mt-1">Platform friction</div></div></div></div>
+          <div className="sm:col-span-2 glass-dark rounded-2xl p-6 border border-white/10"><div className="flex items-center justify-between mb-6"><div><div className="text-xs uppercase tracking-[0.18em] text-[#F0B90B] mb-2">Built for builders</div><h2 className="text-2xl font-bold">Agent-native DX</h2></div><a href="#developer" className="p-2 rounded-lg hover:bg-white/10"><Code2 className="w-5 h-5 text-gray-400" /></a></div><div className="grid grid-cols-2 md:grid-cols-4 gap-4"><div><div className="text-2xl font-bold">47</div><div className="text-xs text-gray-500 mt-1">API calls</div></div><div><div className="text-2xl font-bold text-green-400">0.23%</div><div className="text-xs text-gray-500 mt-1">Avg slippage</div></div><div><div className="text-2xl font-bold text-[#F0B90B]">1.2s</div><div className="text-xs text-gray-500 mt-1">Time to first call</div></div><div><div className="text-2xl font-bold">3.2%</div><div className="text-xs text-gray-500 mt-1">Platform friction</div></div></div><p className="mt-4 text-[11px] text-gray-600">Sample metrics for illustration. Measured values (decision latency, API-call count, transaction links) appear in the telemetry drawer.</p></div>
           <div className="glass-dark rounded-2xl p-6 border border-[#F0B90B]/20"><Activity className="w-5 h-5 text-[#F0B90B] mb-5" /><h3 className="font-bold mb-2">Live execution</h3><p className="text-sm text-gray-400 leading-relaxed">Every swap is observable. Open the telemetry drawer to inspect agent performance in real time.</p><div className="mt-5 flex items-center gap-2 text-xs text-green-400"><span className="w-2 h-2 rounded-full bg-green-400" /> System nominal</div></div>
         </section>
       </div>

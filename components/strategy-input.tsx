@@ -73,7 +73,7 @@ export function StrategyInput({ onSubmit, loading = false }: StrategyInputProps)
 
       {submitted && (
         <div className="mb-4 p-3 bg-green-500/10 border border-green-500/20 rounded-lg animate-fadeIn">
-          <p className="text-sm text-green-300">Strategy submitted to BNB Agent Studio for execution...</p>
+          <p className="text-sm text-green-300">Strategy submitted for parsing and simulation...</p>
         </div>
       )}
 

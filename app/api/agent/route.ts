@@ -7,6 +7,8 @@ import {
   AGENT_STUDIO_ID,
   getBinanceWeb3ApiKey,
   publicAgentStatus,
+  isLiveTradingConfigured,
+  LIVE_TRADING_UNAVAILABLE_REASON,
 } from '@/lib/agent-config';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -342,9 +344,15 @@ export async function POST(request: Request) {
       });
 
       const slippagePercent = Number(slippageBps) / 100;
+      // Only surface calldata as executable when this deployment is genuinely configured for
+      // live trading (verified, pool-backed tokens + authenticated quote provider). Otherwise the
+      // swap would be guaranteed to revert; the client must refuse to broadcast it.
+      const executable = isLiveTradingConfigured();
       return NextResponse.json({
         status: 'success',
-        mode: 'LIVE_MAINNET_AUTONOMOUS',
+        mode: executable ? 'LIVE_MAINNET_AUTONOMOUS' : 'SIMULATION_ONLY',
+        executable,
+        executableReason: executable ? null : LIVE_TRADING_UNAVAILABLE_REASON,
         chainId: BSC_CHAIN_ID,
         requiredBnb: requiredBnb.toFixed(18),
         usdAmount,
