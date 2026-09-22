@@ -262,7 +262,7 @@ export function DXDrawer() {
           <div className="mt-4 p-3 bg-[#F0B90B]/10 border border-[#F0B90B]/20 rounded-lg">
             <p className="text-xs text-gray-300">
               <span className="text-[#F0B90B] font-semibold">Telemetry Status:</span>{' '}
-              {metricsError ?? 'All endpoints responding nominally. Metrics refresh every 5s with safe fallback values.'}
+              {metricsError ?? 'Market metrics above (slippage, liquidity, TTFC, friction, gas, quote time) are sample/estimated values — live market data is not connected. Decision latency, API-call count and transaction links below are measured from real activity.'}
             </p>
             {telemetryLogs.length > 0 && (
               <div className="mt-3 space-y-1 border-t border-white/10 pt-3" aria-label="Recent telemetry logs">

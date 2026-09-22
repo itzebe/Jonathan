@@ -20,7 +20,7 @@ export function StatusHeader() {
           <div className="flex items-center gap-2 text-[#F0B90B]">
             <Database className="w-4 h-4" />
             <span className="font-semibold">Binance Web3 API</span>
-            <span className="text-gray-400">Ready</span>
+            <span className="text-gray-400">Not connected</span>
           </div>
         </div>
       </div>

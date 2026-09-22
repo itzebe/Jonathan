@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { TrendingUp, TrendingDown, AlertCircle } from 'lucide-react';
 
 interface GapData {
@@ -11,51 +10,26 @@ interface GapData {
   direction: 'premium' | 'discount';
 }
 
+// Static, clearly-labeled sample spreads. These are illustrative only: no live on-chain price
+// or off-market reference feed is connected in this deployment, so these are NOT live arbitrage
+// opportunities and must not be represented as executable.
+const SAMPLE_GAPS: GapData[] = [
+  { asset: 'bTSLA ↔ Ondo TSLA', onchainPrice: 242.35, referencePrice: 240.21, spreadPercent: 0.89, direction: 'premium' },
+  { asset: 'bAAPL ↔ Ondo AAPL', onchainPrice: 189.42, referencePrice: 188.95, spreadPercent: 0.25, direction: 'premium' },
+  { asset: 'bNVDA ↔ bAMD Arbitrage', onchainPrice: 135.82, referencePrice: 134.21, spreadPercent: 1.2, direction: 'premium' },
+];
+
 export function MarketGapScanner() {
-  const [gaps, setGaps] = useState<GapData[]>([
-    {
-      asset: 'bTSLA ↔ Ondo TSLA',
-      onchainPrice: 242.35,
-      referencePrice: 240.21,
-      spreadPercent: 0.89,
-      direction: 'premium',
-    },
-    {
-      asset: 'bAAPL ↔ Ondo AAPL',
-      onchainPrice: 189.42,
-      referencePrice: 188.95,
-      spreadPercent: 0.25,
-      direction: 'premium',
-    },
-    {
-      asset: 'bNVDA ↔ bAMD Arbitrage',
-      onchainPrice: 135.82,
-      referencePrice: 134.21,
-      spreadPercent: 1.2,
-      direction: 'premium',
-    },
-  ]);
-
-  useEffect(() => {
-    // Simulate real-time price updates
-    const interval = setInterval(() => {
-      setGaps((prev) =>
-        prev.map((gap) => ({
-          ...gap,
-          spreadPercent: gap.spreadPercent + (Math.random() - 0.5) * 0.1,
-        }))
-      );
-    }, 2000);
-
-    return () => clearInterval(interval);
-  }, []);
+  const gaps = SAMPLE_GAPS;
 
   return (
     <div className="glass-dark rounded-lg p-4 sm:p-6 border border-[#F0B90B]/20">
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-1">
         <AlertCircle className="w-5 h-5 text-[#F0B90B]" />
-        <h2 className="text-lg sm:text-xl font-bold text-white">24/7 Market Disconnect Monitor</h2>
+        <h2 className="text-lg sm:text-xl font-bold text-white">Market Disconnect Monitor</h2>
+        <span className="ml-auto rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-400">Sample data</span>
       </div>
+      <p className="mb-4 text-xs text-gray-500">Illustrative spread examples. A live on-chain price and off-market reference feed is not connected in this deployment.</p>
 
       <div className="space-y-3">
         {gaps.map((gap, idx) => (
@@ -97,8 +71,9 @@ export function MarketGapScanner() {
 
       <div className="mt-4 p-3 bg-[#F0B90B]/10 border border-[#F0B90B]/20 rounded-lg">
         <p className="text-xs text-gray-300">
-          <span className="text-[#F0B90B] font-semibold">Live arbitrage opportunity:</span> Off-market spreads detected between
-          tokenized stocks and Ondo representations. Max gap: +1.20%.
+          <span className="text-[#F0B90B] font-semibold">Example spread:</span> Illustration of how off-market spreads between
+          tokenized stocks and Ondo representations would surface. Not a live feed and not executable until real price
+          sources and pool-backed token contracts are configured.
         </p>
       </div>
     </div>
