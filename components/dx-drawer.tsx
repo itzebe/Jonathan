@@ -18,7 +18,8 @@ interface DXMetrics {
   timeToFirst: number;
   platformFriction: number;
   apiCalls: number;
-  binanceWeb3QuoteMs: number;
+  rpcLatencyMs: number;
+  rpcLatencyStatus: string;
   gasBnb: number;
   gasUsd: number;
 }
@@ -41,7 +42,8 @@ export function DXDrawer() {
     timeToFirst: 1205,
     platformFriction: 3.2,
     apiCalls: 47,
-    binanceWeb3QuoteMs: 210,
+    rpcLatencyMs: 0,
+    rpcLatencyStatus: 'UNAVAILABLE',
     gasBnb: 0.00042,
     gasUsd: 0.24,
   });
@@ -88,7 +90,8 @@ export function DXDrawer() {
           timeToFirst: data.telemetry?.timeToFirstCallMs ?? 1205,
           platformFriction: data.telemetry?.platformFrictionPercent ?? 3.2,
           apiCalls: data.telemetry?.apiCalls ?? 47,
-          binanceWeb3QuoteMs: data.telemetry?.binanceWeb3QuoteMs ?? 210,
+          rpcLatencyMs: data.latencyMs ?? 0,
+          rpcLatencyStatus: data.rpcLatencyStatus ?? 'UNAVAILABLE',
           gasBnb: data.telemetry?.estimatedGasBnb ?? 0.00042,
           gasUsd: data.telemetry?.estimatedGasUsd ?? 0.24,
         });
@@ -205,14 +208,16 @@ export function DXDrawer() {
               <div className="text-xs text-gray-500 mt-1">Session total</div>
             </div>
 
-            {/* Binance Web3 Quote Response Time */}
+            {/* BSC RPC Latency (measured live against the BSC node) */}
             <div className="bg-black/40 border border-white/5 rounded-lg p-3">
               <div className="flex items-center gap-2 mb-1">
                 <Zap className="w-4 h-4 text-[#F0B90B]" />
-                <span className="text-xs text-gray-400 font-semibold">Web3 Quote Time</span>
+                <span className="text-xs text-gray-400 font-semibold">BSC RPC Latency</span>
               </div>
-              <div className="text-2xl font-bold text-white">{metrics.binanceWeb3QuoteMs.toFixed(0)}<span className="text-sm text-gray-400 ml-1">ms</span></div>
-              <div className="text-xs text-gray-500 mt-1">Binance Web3 quote RTT</div>
+              <div className="text-2xl font-bold text-white">{metrics.rpcLatencyMs.toFixed(0)}<span className="text-sm text-gray-400 ml-1">ms</span></div>
+              <div className="text-xs text-gray-500 mt-1">
+                {metrics.rpcLatencyStatus === 'LIVE' ? 'Live eth_chainId RTT' : 'RPC unavailable'}
+              </div>
             </div>
 
             {/* On-Chain Gas Fees */}
