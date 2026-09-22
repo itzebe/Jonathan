@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { measureBscRpcLatencyMs, getBnbUsdPrice } from '@/lib/market-data';
 
 interface DXMetricsResponse {
   timestamp: string;
@@ -13,6 +14,7 @@ interface DXMetricsResponse {
     direction: 'premium' | 'discount';
     opportunityRank: number;
   }>;
+  rpcLatencyStatus?: 'LIVE' | 'UNAVAILABLE';
   telemetry: {
     executionSlippage: number;
     liquidityDepthUsd: number;
@@ -21,7 +23,6 @@ interface DXMetricsResponse {
     apiCalls: number;
     rpcHealthPercent: number;
     cacheHitRate: number;
-    binanceWeb3QuoteMs: number;
     estimatedGasBnb: number;
     estimatedGasUsd: number;
   };
@@ -37,28 +38,15 @@ interface DXMetricsResponse {
   };
 }
 
-// Measures a real round trip to Binance market data as a live proxy for the Binance Web3
-// quote response time. Falls back to a representative value if the request is unavailable.
-async function measureBinanceWeb3QuoteMs(): Promise<number> {
-  const startedAt = Date.now();
-  try {
-    const response = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', {
-      signal: AbortSignal.timeout(2500),
-      cache: 'no-store',
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    await response.json();
-    return Date.now() - startedAt;
-  } catch {
-    return Math.round(180 + Math.random() * 60);
-  }
-}
-
 export async function GET() {
   try {
     const now = Date.now();
-    const binanceWeb3QuoteMs = await measureBinanceWeb3QuoteMs();
-    const latency = Math.round(130 + Math.sin(now / 1000) * 18 + Math.random() * 12);
+    // Real, reachable on-chain measurement: a live eth_chainId round trip to the BSC RPC.
+    // (Binance's own API is geo-blocked from US serverless regions, so it cannot be probed.)
+    const rpc = await measureBscRpcLatencyMs();
+    const latency = rpc.status === 'LIVE'
+      ? rpc.latencyMs
+      : Math.round(130 + Math.sin(now / 1000) * 18 + Math.random() * 12);
     const executionSlippage = Number((0.18 + Math.random() * 0.12).toFixed(2));
     const liquidityDepthUsd = Math.round(2800000 + Math.random() * 100000);
     const timeToFirstCall = Math.round(1150 + Math.random() * 120);
@@ -66,7 +54,9 @@ export async function GET() {
     const apiCalls = Math.round(40 + Math.random() * 12);
     // Representative BSC spot-swap gas cost. BSC gas is ~1 gwei; a V3 swap is ~180k gas.
     const estimatedGasBnb = Number((0.00042 + Math.random() * 0.00006).toFixed(8));
-    const estimatedGasUsd = Number((estimatedGasBnb * 580).toFixed(4));
+    // Live BNB/USD price so the USD gas estimate reflects the real market, not a stale constant.
+    const bnb = await getBnbUsdPrice();
+    const estimatedGasUsd = Number((estimatedGasBnb * bnb.price).toFixed(4));
 
     // Determine health status based on metrics
     let healthStatus: 'nominal' | 'degraded' | 'warning' = 'nominal';
@@ -114,7 +104,8 @@ export async function GET() {
       chainId: 56,
       latencyMs: latency,
       healthStatus,
-      rpcEndpointUsed: 'https://bsc-dataseed.binance.org/',
+      rpcEndpointUsed: rpc.rpcUrl,
+      rpcLatencyStatus: rpc.status,
       gaps,
       telemetry: {
         executionSlippage,
@@ -122,9 +113,8 @@ export async function GET() {
         timeToFirstCallMs: timeToFirstCall,
         platformFrictionPercent: platformFriction,
         apiCalls,
-        rpcHealthPercent: Math.max(85, 100 - Math.floor(latency / 20)),
+        rpcHealthPercent: rpc.status === 'LIVE' ? Math.max(85, 100 - Math.floor(latency / 20)) : 0,
         cacheHitRate: Math.random() > 0.5 ? 0.92 : 0.78,
-        binanceWeb3QuoteMs,
         estimatedGasBnb,
         estimatedGasUsd,
       },

@@ -10,6 +10,7 @@ import {
   isLiveTradingConfigured,
   LIVE_TRADING_UNAVAILABLE_REASON,
 } from '@/lib/agent-config';
+import { getBnbUsdPrice } from '@/lib/market-data';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const PANCAKESWAP_V3_ROUTER = CONTRACTS.pancakeV3Router;
@@ -75,22 +76,6 @@ function parseUsdAmount(prompt: string) {
   const match = prompt.match(/(?:\$|usd\s*)(\d+(?:\.\d+)?)/i);
   const amount = match ? Number(match[1]) : 0.5;
   return Number.isFinite(amount) && amount > 0 ? amount : 0.5;
-}
-
-async function getBnbUsdPrice() {
-  try {
-    const response = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', {
-      next: { revalidate: 15 },
-      signal: AbortSignal.timeout(2500),
-    });
-    if (!response.ok) throw new Error(`Binance returned HTTP ${response.status}`);
-    const data = await response.json();
-    const price = Number(data?.price);
-    if (!Number.isFinite(price) || price <= 0) throw new Error('Binance returned an invalid price');
-    return { price, isFallbackPrice: false };
-  } catch {
-    return { price: 580, isFallbackPrice: true };
-  }
 }
 
 type MinimumOutputResult =
@@ -266,10 +251,12 @@ export async function POST(request: Request) {
     }
 
     if (body?.action === 'quote' || body?.action === 'execute' || body?.action === 'activate-agent') {
-      const usdAmount = body?.action === 'activate-agent'
-        ? (body?.unit === 'USD' ? Number(body?.budget) || 0.5 : (Number(body?.budget) || 0.00086) * 580)
-        : parseUsdAmount(prompt);
+      // Fetch the live BNB/USD price first so a BNB-denominated allowance is converted using the
+      // real market price rather than a hardcoded constant.
       const priceResult = await getBnbUsdPrice();
+      const usdAmount = body?.action === 'activate-agent'
+        ? (body?.unit === 'USD' ? Number(body?.budget) || 0.5 : (Number(body?.budget) || 0.00086) * priceResult.price)
+        : parseUsdAmount(prompt);
       const requiredBnb = usdAmount / priceResult.price;
       const amountIn = BigInt(Math.floor(requiredBnb * 1e18));
       const selectedToken = prompt.includes('ondo') || prompt.includes('yield')
@@ -364,6 +351,8 @@ export async function POST(request: Request) {
         isFallbackQuote: quoteSource === 'local-auto-slippage',
         bnbUsdPrice: priceResult.price,
         isFallbackPrice: priceResult.isFallbackPrice,
+        priceStatus: priceResult.status,
+        priceSource: priceResult.source,
         maxSlippagePercent: slippagePercent,
         deadline: deadline.toString(),
         deadlineSeconds: EXECUTION_DEADLINE_SECONDS,
