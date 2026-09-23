@@ -1,0 +1,22 @@
+services:
+  web:
+    image: node:22-slim
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./:/app
+      # Keep installed deps out of the bind mount so host node_modules doesn't clobber container's
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      # Next.js dev server must bind all interfaces for the preview proxy to reach it
+      - HOSTNAME=0.0.0.0
+      - PORT=3000
+      # Vite-style host allow passthrough (harmless for Next; platform sets this)
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+      # Passed through so next.config.mjs can build allowedDevOrigins for the preview origin
+      - BASE44_PUBLIC_HOST_SUFFIX
+    command: >
+      sh -c "corepack enable && corepack prepare pnpm@12.3.4 --activate && pnpm install --frozen-lockfile && pnpm exec next dev -H 0.0.0.0 -p 3000"
