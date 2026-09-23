@@ -18,5 +18,7 @@ services:
       - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
       # Passed through so next.config.mjs can build allowedDevOrigins for the preview origin
       - BASE44_PUBLIC_HOST_SUFFIX
+    env_file:
+      - /run/base44/app.env
     command: >
       sh -c "corepack enable && corepack prepare pnpm@12.3.4 --activate && pnpm install --frozen-lockfile && pnpm exec next dev -H 0.0.0.0 -p 3000"

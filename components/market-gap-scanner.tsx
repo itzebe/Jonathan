@@ -10,13 +10,14 @@ interface GapData {
   direction: 'premium' | 'discount';
 }
 
-// Static, clearly-labeled sample spreads. These are illustrative only: no live on-chain price
-// or off-market reference feed is connected in this deployment, so these are NOT live arbitrage
-// opportunities and must not be represented as executable.
+// Static, clearly-labeled sample spreads for xStocks on BSC. These are illustrative only:
+// no live on-chain price feed is connected in this deployment, so these are NOT live arbitrage
+// opportunities and must not be represented as executable. When the Binance Web3 Market API is
+// configured, these will be replaced with real price data.
 const SAMPLE_GAPS: GapData[] = [
-  { asset: 'bTSLA ↔ Ondo TSLA', onchainPrice: 242.35, referencePrice: 240.21, spreadPercent: 0.89, direction: 'premium' },
-  { asset: 'bAAPL ↔ Ondo AAPL', onchainPrice: 189.42, referencePrice: 188.95, spreadPercent: 0.25, direction: 'premium' },
-  { asset: 'bNVDA ↔ bAMD Arbitrage', onchainPrice: 135.82, referencePrice: 134.21, spreadPercent: 1.2, direction: 'premium' },
+  { asset: 'NVDAx ↔ USDC', onchainPrice: 216.35, referencePrice: 214.21, spreadPercent: 1.0, direction: 'premium' },
+  { asset: 'TSLAx ↔ USDC', onchainPrice: 248.42, referencePrice: 247.95, spreadPercent: 0.19, direction: 'premium' },
+  { asset: 'AAPLx ↔ USDC', onchainPrice: 189.82, referencePrice: 188.21, spreadPercent: 0.86, direction: 'premium' },
 ];
 
 export function MarketGapScanner() {
@@ -26,10 +27,10 @@ export function MarketGapScanner() {
     <div className="glass-dark rounded-lg p-4 sm:p-6 border border-[#F0B90B]/20">
       <div className="flex items-center gap-2 mb-1">
         <AlertCircle className="w-5 h-5 text-[#F0B90B]" />
-        <h2 className="text-lg sm:text-xl font-bold text-white">Market Disconnect Monitor</h2>
+        <h2 className="text-lg sm:text-xl font-bold text-white">xStock Price Monitor</h2>
         <span className="ml-auto rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-400">Sample data</span>
       </div>
-      <p className="mb-4 text-xs text-gray-500">Illustrative spread examples. A live on-chain price and off-market reference feed is not connected in this deployment.</p>
+      <p className="mb-4 text-xs text-gray-500">Illustrative xStock spreads on BSC. Live price data from the Binance Web3 Market API will appear here when configured.</p>
 
       <div className="space-y-3">
         {gaps.map((gap, idx) => (
@@ -71,9 +72,8 @@ export function MarketGapScanner() {
 
       <div className="mt-4 p-3 bg-[#F0B90B]/10 border border-[#F0B90B]/20 rounded-lg">
         <p className="text-xs text-gray-300">
-          <span className="text-[#F0B90B] font-semibold">Example spread:</span> Illustration of how off-market spreads between
-          tokenized stocks and Ondo representations would surface. Not a live feed and not executable until real price
-          sources and pool-backed token contracts are configured.
+          <span className="text-[#F0B90B] font-semibold">xStocks on BSC:</span> Tokenized equities (NVDAx, AAPLx, TSLAx) issued by Backed Finance,
+          trading via AMM liquidity pools on BNB Smart Chain. Real price data requires Binance Web3 API configuration.
         </p>
       </div>
     </div>

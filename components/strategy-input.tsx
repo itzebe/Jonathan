@@ -10,16 +10,16 @@ interface StrategyInputProps {
 
 const PRESETS = [
   {
-    label: 'Gap Rotation',
-    prompt: 'Rotate 40% of bTSLA into Ondo USDY when off-market volatility spikes',
+    label: 'Buy on Dip',
+    prompt: 'Buy $20 of NVDAx if it drops 3%',
   },
   {
-    label: 'Cross-Protocol Arb',
-    prompt: 'Cross-protocol arbitrage between bStocks and Ondo representations of TSLA',
+    label: 'Portfolio Rotation',
+    prompt: 'Move 25% of my portfolio into TSLAx if the market drops 5%',
   },
   {
-    label: 'Auto-DCA',
-    prompt: 'Auto-DCA $50 USDT into AI Chips basket on market-close gaps',
+    label: 'Gap Opportunity',
+    prompt: 'Find a tokenized stock opportunity with at least 1% expected net advantage and execute only if all risk conditions pass',
   },
 ];
 
@@ -55,7 +55,7 @@ export function StrategyInput({ onSubmit, loading = false }: StrategyInputProps)
             type="text"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Describe your strategy in plain English..."
+            placeholder="e.g. Buy $20 of NVDAx if it drops 3%"
             className="flex-1 bg-black/40 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-[#F0B90B]/50 focus:ring-1 focus:ring-[#F0B90B]/20 transition-all"
             disabled={loading}
           />

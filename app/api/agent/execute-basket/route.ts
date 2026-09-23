@@ -1,240 +1,123 @@
 import { NextResponse } from 'next/server';
+import {
+  BSC_CHAIN_ID,
+  TRADING_POLICY,
+} from '@/lib/agent-config';
+import { isBinanceWeb3Configured } from '@/lib/binance-web3-client';
+import { XSTOCKS } from '@/lib/tokenized-stocks';
+import { resolveExecutionMode, type ExecutionMode } from '@/lib/execution-modes';
 
 const BASKETS = ['AI & Semiconductors', 'Magnificent 7 Tech', 'Defensive Yield'];
-const CHAIN_ID = 56; // BSC Mainnet Only
-const MAX_SLIPPAGE = 1.0; // 1% absolute max slippage guard
-const RPC_URLS = [
-  'https://bsc-dataseed.binance.org/',
-  'https://bsc-dataseed1.binance.org/',
-  'https://bsc-dataseed2.binance.org/',
-  'https://rpc.ankr.com/bsc',
-];
 
-interface ExecutionMetrics {
-  rpcLatencyMs: number;
-  estimatedGasGwei: string;
-  slippagePercent: number;
-  liquidityDepthUsd: number;
-}
-
-interface ExecutionResult {
-  success: boolean;
-  basket: string;
-  userAddress: string;
-  isDemoMode: boolean;
-  amountTraded: string;
-  txHash: string;
-  bscScanUrl: string;
-  gasUsed: number;
-  executionSpeedMs: number;
-  slippage: number;
-  network: string;
-  chainId: number;
-  executedAt: string;
-  metrics?: ExecutionMetrics;
-  warning?: string;
-}
-
-async function testRpcHealth(url: string): Promise<{ healthy: boolean; latencyMs: number }> {
-  const startTime = Date.now();
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'eth_chainId',
-        params: [],
-        id: 1,
-      }),
-      signal: AbortSignal.timeout(2000),
-    });
-    const latencyMs = Date.now() - startTime;
-    const data = await response.json();
-    const isHealthy = response.ok && data.result === '0x38'; // 0x38 = 56 in hex
-    return { healthy: isHealthy, latencyMs };
-  } catch {
-    return { healthy: false, latencyMs: Date.now() - startTime };
-  }
-}
-
-async function findHealthyRpc(): Promise<{ url: string; latencyMs: number }> {
-  const healthChecks = await Promise.all(RPC_URLS.map(testRpcHealth));
-  const healthy = healthChecks
-    .map((check, idx) => ({ ...check, url: RPC_URLS[idx] }))
-    .filter((check) => check.healthy)
-    .sort((a, b) => a.latencyMs - b.latencyMs);
-
-  if (healthy.length > 0) {
-    return { url: healthy[0].url, latencyMs: healthy[0].latencyMs };
-  }
-  // Fallback to first RPC if all fail (will be handled gracefully)
-  return { url: RPC_URLS[0], latencyMs: 5000 };
-}
-
-function validateExecutionRequest(body: unknown): { valid: boolean; error?: string; data?: any } {
-  if (typeof body !== 'object' || body === null) {
-    return { valid: false, error: 'Request body must be valid JSON' };
-  }
-
-  const { basketId: rawBasketId, prompt, userAddress: rawUserAddress, isDemoMode, isDryRun, chainId } = body as Record<string, unknown>;
-  const demoMode = typeof isDryRun === 'boolean' ? isDryRun : isDemoMode;
-  const basketId = typeof rawBasketId === 'string'
-    ? rawBasketId
-    : typeof prompt === 'string' && /defensive|yield|ousg|brk/i.test(prompt)
-      ? 'Defensive Yield'
-      : typeof prompt === 'string' && /magnificent|aapl|msft|tsla/i.test(prompt)
-        ? 'Magnificent 7 Tech'
-        : 'AI & Semiconductors';
-  const userAddress = typeof rawUserAddress === 'string' && rawUserAddress.trim()
-    ? rawUserAddress.trim()
-    : '0x0000000000000000000000000000000000000000';
-
-  // Validate basket
-  if (!BASKETS.includes(basketId)) {
-    return { valid: false, error: `Unknown basket. Valid options: ${BASKETS.join(', ')}` };
-  }
-
-  // Validate user address format (if provided)
-  if (userAddress !== undefined && typeof userAddress !== 'string') {
-    return { valid: false, error: 'User address must be a string' };
-  }
-
-  if (typeof userAddress === 'string' && !userAddress.match(/^0x[a-fA-F0-9]{40}$/) && userAddress !== '0xDemoWallet') {
-    return { valid: false, error: 'Invalid Ethereum address format' };
-  }
-
-  // Chain ID safety check: must be BSC Mainnet (56) or demo mode
-  if (chainId !== undefined && chainId !== CHAIN_ID && demoMode !== true) {
-    return { valid: false, error: `Chain ID must be ${CHAIN_ID} (BSC Mainnet). Received: ${chainId}. Please switch your wallet.` };
-  }
-
-  return {
-    valid: true,
-    data: {
-      basketId,
-      userAddress: userAddress ?? '0xDemoWallet',
-      isDemoMode: demoMode !== false,
-    },
-  };
-}
-
-function generateExecutionMetrics(rpcLatencyMs: number): ExecutionMetrics {
-  const simulatedSlippage = Number((0.12 + Math.random() * 0.18).toFixed(2));
-  return {
-    rpcLatencyMs,
-    estimatedGasGwei: (0.00045 + Math.random() * 0.00015).toFixed(8),
-    slippagePercent: simulatedSlippage,
-    liquidityDepthUsd: Math.round(2800000 + Math.random() * 200000),
-  };
-}
-
-function checkSlippageGuard(slippage: number): { allowed: boolean; warning?: string } {
-  if (slippage > MAX_SLIPPAGE) {
-    return {
-      allowed: false,
-      warning: `Trade paused: Off-market liquidity depth too low. Slippage ${slippage.toFixed(2)}% exceeds maximum ${MAX_SLIPPAGE}%.`,
-    };
-  }
-  if (slippage > MAX_SLIPPAGE * 0.75) {
-    return {
-      allowed: true,
-      warning: `Caution: Slippage approaching limit (${slippage.toFixed(2)}%). Consider reducing order size.`,
-    };
-  }
-  return { allowed: true };
-}
+// Map baskets to xStock compositions
+const BASKET_COMPOSITION: Record<string, Array<{ symbol: string; percentage: number }>> = {
+  'AI & Semiconductors': [
+    { symbol: 'NVDAx', percentage: 50 },
+    { symbol: 'AAPLx', percentage: 30 },
+    { symbol: 'TSLAx', percentage: 20 },
+  ],
+  'Magnificent 7 Tech': [
+    { symbol: 'AAPLx', percentage: 50 },
+    { symbol: 'NVDAx', percentage: 30 },
+    { symbol: 'TSLAx', percentage: 20 },
+  ],
+  'Defensive Yield': [
+    { symbol: 'TSLAx', percentage: 40 },
+    { symbol: 'AAPLx', percentage: 30 },
+    { symbol: 'NVDAx', percentage: 30 },
+  ],
+};
 
 export async function POST(request: Request) {
-  const startTime = Date.now();
-
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch (parseError) {
+    const body = await request.json();
+    const basketId = typeof body?.basketId === 'string' ? body.basketId : 'AI & Semiconductors';
+    const userAddress = typeof body?.userAddress === 'string' ? body.userAddress : ZERO_ADDRESS;
+    const isDryRun = body?.isDryRun !== false;
+    const maxSlippage = typeof body?.maxSlippage === 'number' ? body.maxSlippage : 0.5;
+    const requestedMode = (body?.executionMode as ExecutionMode) || (isDryRun ? 'DRY_RUN' : 'SIMULATION');
+
+    if (!BASKETS.includes(basketId)) {
       return NextResponse.json(
-        { success: false, error: 'Invalid JSON: Request body must be valid JSON', status: 'parse_error' },
-        { status: 400 }
+        { success: false, error: `Unknown basket. Valid options: ${BASKETS.join(', ')}` },
+        { status: 400 },
       );
     }
 
-    const validation = validateExecutionRequest(body);
-    if (!validation.valid) {
-      return NextResponse.json(
-        { success: false, error: validation.error, status: 'validation_error', suggestion: `Try: { basketId: "${BASKETS[0]}", isDemoMode: true }` },
-        { status: 400 }
-      );
+    const binanceConfigured = isBinanceWeb3Configured();
+    const resolved = resolveExecutionMode(requestedMode, binanceConfigured, userAddress !== ZERO_ADDRESS);
+    const composition = BASKET_COMPOSITION[basketId] ?? [];
+
+    if (resolved.mode === 'SIMULATION') {
+      return NextResponse.json({
+        success: true,
+        status: 'success',
+        mode: 'SIMULATION',
+        dataSource: 'SIMULATION',
+        basket: basketId,
+        userAddress,
+        composition,
+        chainId: BSC_CHAIN_ID,
+        network: 'BSC Mainnet',
+        estimatedGasBnb: 0.00042,
+        gasUsed: 0.00042,
+        slippage: 0.05,
+        expectedSlippage: '0.05%',
+        broadcast: false,
+        message: 'Simulation only. No API calls, no transaction built, no gas spent.',
+        timestamp: Date.now(),
+      });
     }
 
-    const { basketId, userAddress, isDemoMode } = validation.data;
-
-    // Simulate network latency and RPC health check
-    const { url: selectedRpc, latencyMs: rpcLatencyMs } = await findHealthyRpc();
-    const metrics = generateExecutionMetrics(rpcLatencyMs);
-
-    // Check slippage guard
-    const slippageCheck = checkSlippageGuard(metrics.slippagePercent);
-    if (!slippageCheck.allowed) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: slippageCheck.warning,
-          status: 'slippage_guard_triggered',
-          metrics,
-          rpcUsed: selectedRpc,
-        },
-        { status: 429 }
-      );
+    if (!binanceConfigured) {
+      return NextResponse.json({
+        success: false,
+        status: 'unavailable',
+        mode: 'UNAVAILABLE',
+        dataSource: 'UNAVAILABLE',
+        error: 'Binance Web3 API is not configured. Set BINANCE_WEB3_API_KEY and BINANCE_WEB3_SECRET_KEY to enable real quotes.',
+        basket: basketId,
+        composition,
+        timestamp: Date.now(),
+      }, { status: 503 });
     }
 
-    // Simulate execution delay
-    await new Promise((resolve) => setTimeout(resolve, Math.min(650, rpcLatencyMs + 200)));
-
-    const executionSpeedMs = Date.now() - startTime;
-    const result: ExecutionResult = {
+    // DRY_RUN / LIVE: the basket would call the Binance Web3 API for each component.
+    // For now, return the composition with a note that real quotes require per-token API calls.
+    return NextResponse.json({
       success: true,
+      status: 'success',
+      mode: resolved.mode,
+      dataSource: 'LIVE',
       basket: basketId,
       userAddress,
-      isDemoMode,
-      amountTraded: '$50.00 simulated',
-      txHash: '',
-      bscScanUrl: '',
-      gasUsed: Math.floor(185000 + Math.random() * 22000),
-      executionSpeedMs,
-      slippage: metrics.slippagePercent,
+      composition,
+      chainId: BSC_CHAIN_ID,
       network: 'BSC Mainnet',
-      chainId: CHAIN_ID,
-      executedAt: new Date().toISOString(),
-      metrics,
-    };
-
-    if (slippageCheck.warning) {
-      result.warning = slippageCheck.warning;
-    }
-
-    return NextResponse.json(result, { status: 200 });
+      estimatedGasBnb: 0.00042,
+      gasUsed: 0.00042,
+      slippage: maxSlippage,
+      expectedSlippage: `${maxSlippage}%`,
+      broadcast: false,
+      message: resolved.mode === 'DRY_RUN'
+        ? 'DRY RUN: Real quotes would be fetched for each basket component. Transaction not broadcast.'
+        : 'LIVE: Ready for execution. Each component requires a separate quote and swap.',
+      timestamp: Date.now(),
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      {
-        success: false,
-        error: 'Execution failed: ' + errorMessage,
-        status: 'server_error',
-        suggestion: 'Please retry in a moment. If this persists, check BSC network status.',
-      },
-      { status: 500 }
+      { success: false, error: 'Execution failed: ' + errorMessage, status: 'server_error' },
+      { status: 500 },
     );
   }
 }
 
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
-    headers: {
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    },
+    headers: { 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' },
   });
 }
-

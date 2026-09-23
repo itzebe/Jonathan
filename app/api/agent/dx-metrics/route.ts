@@ -68,9 +68,9 @@ export async function GET() {
 
     // Generate price gaps with opportunity ranking
     const gaps = [
-      { asset: 'bTSLA / Ondo TSLA', gapPercent: 0.89, direction: 'premium' as const, opportunityRank: 1 },
-      { asset: 'bAAPL / Ondo AAPL', gapPercent: 0.25, direction: 'premium' as const, opportunityRank: 3 },
-      { asset: 'bNVDA / bAMD', gapPercent: 1.2, direction: 'premium' as const, opportunityRank: 1 },
+      { asset: 'NVDAx / USDC', gapPercent: 1.0, direction: 'premium' as const, opportunityRank: 1 },
+      { asset: 'AAPLx / USDC', gapPercent: 0.86, direction: 'premium' as const, opportunityRank: 2 },
+      { asset: 'TSLAx / USDC', gapPercent: 0.19, direction: 'premium' as const, opportunityRank: 3 },
     ].sort((a, b) => b.gapPercent - a.gapPercent);
 
     // Risk factors based on current metrics

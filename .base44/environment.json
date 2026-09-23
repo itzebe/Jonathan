@@ -2,5 +2,24 @@
   "previewPort": 3000,
   "healthPath": "/",
   "startCommand": "docker compose -f docker-compose.base44.yml up -d",
-  "secrets": []
+  "secrets": [
+    {
+      "name": "BINANCE_WEB3_API_KEY",
+      "description": "Binance Web3 API key from the Developer Portal (https://web3.binance.com/en/dev-portal/project). Used as the X-OC-APIKEY header for authenticated API requests.",
+      "requiredAtBoot": false,
+      "generatedForDevelopment": true
+    },
+    {
+      "name": "BINANCE_WEB3_SECRET_KEY",
+      "description": "Binance Web3 API secret key from the Developer Portal. Used for HMAC-SHA256 request signing (X-OC-SIGN header). Never exposed to the browser.",
+      "requiredAtBoot": false,
+      "generatedForDevelopment": true
+    },
+    {
+      "name": "OPENAI_API_KEY",
+      "description": "OpenAI API key for natural-language strategy parsing. Optional — the app falls back to deterministic regex parsing when not set.",
+      "requiredAtBoot": false,
+      "generatedForDevelopment": true
+    }
+  ]
 }

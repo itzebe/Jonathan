@@ -69,28 +69,29 @@ import { recordDecision, recordTransaction } from '@/lib/telemetry';
 const baskets = [
   {
     title: 'AI & Semiconductors',
-    description: 'High-conviction exposure to the AI infrastructure cycle',
+    description: 'High-conviction exposure to the AI infrastructure cycle via xStocks on BSC',
     composition: [
-      { asset: 'bNVDA', percentage: 40 },
-      { asset: 'bAMD', percentage: 30 },
-      { asset: 'Ondo USDY', percentage: 30 },
+      { asset: 'NVDAx', percentage: 50 },
+      { asset: 'AAPLx', percentage: 30 },
+      { asset: 'TSLAx', percentage: 20 },
     ],
   },
   {
     title: 'Magnificent 7 Tech',
-    description: 'The leaders powering the next decade of software',
+    description: 'The leaders powering the next decade of software — tokenized on BNB Chain',
     composition: [
-      { asset: 'bAAPL', percentage: 50 },
-      { asset: 'bMSFT', percentage: 30 },
-      { asset: 'bTSLA', percentage: 20 },
+      { asset: 'AAPLx', percentage: 50 },
+      { asset: 'NVDAx', percentage: 30 },
+      { asset: 'TSLAx', percentage: 20 },
     ],
   },
   {
     title: 'Defensive Yield',
-    description: 'Steady onchain income with blue-chip resilience',
+    description: 'Steady tokenized equity exposure with blue-chip resilience on BSC',
     composition: [
-      { asset: 'Ondo USDY / OUSG', percentage: 70 },
-      { asset: 'bBRK.B', percentage: 30 },
+      { asset: 'TSLAx', percentage: 40 },
+      { asset: 'AAPLx', percentage: 30 },
+      { asset: 'NVDAx', percentage: 30 },
     ],
   },
 ];
@@ -104,7 +105,8 @@ export default function Page() {
   const [strategyLoading, setStrategyLoading] = useState(false);
   const [strategyStatus, setStrategyStatus] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
-  const [isDryRun, setIsDryRun] = useState(false);
+  const [executionMode, setExecutionMode] = useState<'SIMULATION' | 'DRY_RUN' | 'LIVE'>('SIMULATION');
+  const isDryRun = executionMode !== 'LIVE'; // backward compat: anything not LIVE is "dry" (no broadcast)
   const [activeTxHash, setActiveTxHash] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [executionSpeed, setExecutionSpeed] = useState<'aggressive' | 'guarded'>('aggressive');
@@ -147,7 +149,7 @@ export default function Page() {
         const response = await fetch('/api/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'quote', prompt: 'Scan bTSLA bAAPL and Ondo price gaps on BSC Mainnet', ...(walletAddress ? { userAddress: String(walletAddress) } : {}), maxSlippage }),
+          body: JSON.stringify({ action: 'quote', prompt: 'Scan NVDAx AAPLx and TSLAx price gaps on BSC Mainnet', executionMode, ...(walletAddress ? { userAddress: String(walletAddress) } : {}), maxSlippage }),
         });
         const result = await readJsonResponse<{ calculatedSlippage?: number; reroutedAsset?: string; requiredBnb?: string; quoteResponseMs?: number; maxSlippagePercent?: number; gasBufferBnb?: string }>(response);
         if (cancelled) return;
@@ -296,9 +298,9 @@ export default function Page() {
     const quoteResponse = await fetch('/api/agent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'quote', prompt, userAddress: String(connectedAddress), maxSlippage: slippage }),
+      body: JSON.stringify({ action: 'quote', prompt, executionMode, userAddress: String(connectedAddress), maxSlippage: slippage }),
     });
-    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; executable?: boolean; executableReason?: string | null; calculatedSlippage?: number; reroutedAsset?: string; quoteResponseMs?: number; maxSlippagePercent?: number }>(quoteResponse);
+    const quote = await readJsonResponse<{ usdAmount: number; requiredBnb: string; gasBufferBnb: string; targetRouter: string; calldata: string; executable?: boolean; executableReason?: string | null; calculatedSlippage?: number; reroutedAsset?: string; quoteResponseMs?: number; maxSlippagePercent?: number; dataSource?: string; executionMode?: string; toTokenAmount?: string }>(quoteResponse);
     recordDecision({
       decisionLatencyMs: performance.now() - decisionStartedAt,
       quoteResponseMs: quote.quoteResponseMs ?? null,
@@ -398,6 +400,7 @@ export default function Page() {
           userAddress: connectedAddress,
           isDemoMode: true,
           isDryRun: true,
+          executionMode,
           chainId: 56,
           maxSlippage,
         }),
@@ -471,7 +474,7 @@ export default function Page() {
       const quoteResponse = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'quote', prompt: `Delegate $${usdAmount} allowance`, userAddress: String(connectedAddress), maxSlippage }),
+        body: JSON.stringify({ action: 'quote', prompt: `Delegate $${usdAmount} allowance`, executionMode, userAddress: String(connectedAddress), maxSlippage }),
       });
       const quote = await readJsonResponse<{ executable?: boolean; executableReason?: string | null }>(quoteResponse);
       if (quote.executable !== true) {
@@ -506,7 +509,7 @@ export default function Page() {
       const parseResponse = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'parse-strategy', prompt, maxSlippage }),
+        body: JSON.stringify({ action: 'parse-strategy', prompt, executionMode, maxSlippage }),
       });
       const parsed = await readJsonResponse<{ success?: boolean; suggestion?: string; suggestions?: string[]; targetToken?: string; hedgeAsset?: string }>(parseResponse);
       if (parsed.success !== true) {
@@ -524,7 +527,7 @@ export default function Page() {
         const executionResponse = await fetch('/api/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt, basketId: 'AI & Semiconductors', userAddress: walletAddress, isDryRun: true, chainId: 56, maxSlippage }),
+          body: JSON.stringify({ prompt, basketId: 'AI & Semiconductors', userAddress: walletAddress, isDryRun: true, executionMode, chainId: 56, maxSlippage }),
         });
         const result = await readJsonResponse<{ txHash?: string; gasUsed?: number; estimatedGasBnb?: number; slippage?: number; expectedSlippage?: string }>(executionResponse);
         setStrategyStatus(3);
@@ -551,8 +554,9 @@ export default function Page() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
           <div className="flex min-w-0 items-center gap-2 sm:gap-3">
             <div className="flex shrink-0 items-center rounded-xl border border-white/10 bg-white/[0.04] p-1" aria-label="Execution mode">
-              <button onClick={() => setIsDryRun(true)} className={`min-h-9 rounded-lg px-2 text-[10px] font-bold transition-colors sm:px-3 sm:text-xs ${isDryRun ? 'bg-[#F0B90B] text-black shadow-lg shadow-[#F0B90B]/10' : 'text-gray-400 hover:text-white'}`} aria-pressed={isDryRun} title="Simulates safely with no gas.">⚡ <span className="hidden sm:inline">Simulation</span><span className="sm:hidden">Sim</span></button>
-              <button onClick={() => setIsDryRun(false)} className={`min-h-9 rounded-lg px-2 text-[10px] font-bold transition-colors sm:px-3 sm:text-xs ${!isDryRun ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-400 hover:text-white'}`} aria-pressed={!isDryRun} title="Requests a real BSC Mainnet wallet signature.">🔥 <span className="hidden xs:inline">Live Mainnet</span><span className="xs:hidden">Live</span></button>
+              <button onClick={() => setExecutionMode('SIMULATION')} className={`min-h-9 rounded-lg px-2 text-[10px] font-bold transition-colors sm:px-3 sm:text-xs ${executionMode === 'SIMULATION' ? 'bg-[#F0B90B] text-black shadow-lg shadow-[#F0B90B]/10' : 'text-gray-400 hover:text-white'}`} aria-pressed={executionMode === 'SIMULATION'} title="No API calls, no transaction, no gas.">⚡ <span className="hidden sm:inline">Simulation</span><span className="sm:hidden">Sim</span></button>
+              <button onClick={() => setExecutionMode('DRY_RUN')} className={`min-h-9 rounded-lg px-2 text-[10px] font-bold transition-colors sm:px-3 sm:text-xs ${executionMode === 'DRY_RUN' ? 'bg-blue-500/20 text-blue-200 ring-1 ring-blue-400/40' : 'text-gray-400 hover:text-white'}`} aria-pressed={executionMode === 'DRY_RUN'} title="Real Binance Web3 API quotes, no broadcast.">🔍 <span className="hidden sm:inline">Dry Run</span><span className="sm:hidden">Dry</span></button>
+              <button onClick={() => setExecutionMode('LIVE')} className={`min-h-9 rounded-lg px-2 text-[10px] font-bold transition-colors sm:px-3 sm:text-xs ${executionMode === 'LIVE' ? 'bg-red-500/20 text-red-200 ring-1 ring-red-400/40' : 'text-gray-400 hover:text-white'}`} aria-pressed={executionMode === 'LIVE'} title="Requests a real BSC Mainnet wallet signature.">🔥 <span className="hidden xs:inline">Live Mainnet</span><span className="xs:hidden">Live</span></button>
             </div>
             <a href="#top" className="flex min-w-0 items-center gap-2 sm:gap-3">
               <div className="hidden size-9 shrink-0 rounded-xl bg-[#F0B90B] text-center font-black text-xl leading-9 text-black shadow-lg shadow-[#F0B90B]/20 sm:block">E</div>
@@ -590,9 +594,9 @@ export default function Page() {
       <div id="top" className="max-w-7xl mx-auto px-4 sm:px-6 py-10 sm:py-16">
         <section className="grid lg:grid-cols-[1.25fr_.75fr] gap-8 items-end mb-16">
           <div>
-            <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[#F0B90B] mb-5"><span className="w-2 h-2 rounded-full bg-[#F0B90B]" /> Verified simulation · in-browser monitor</div>
+            <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[#F0B90B] mb-5"><span className="w-2 h-2 rounded-full bg-[#F0B90B]" /> xStocks on BSC · Binance Web3 API</div>
             <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black tracking-[-0.04em] leading-[0.98] max-w-4xl">Trade the gap.<br /><span className="text-[#F0B90B]">Own the upside.</span></h1>
-            <p className="mt-6 text-base sm:text-lg text-gray-400 max-w-2xl leading-relaxed">Tokenized stock baskets with an autonomous agent that finds off-market pricing gaps and executes on BSC while traditional markets sleep.</p>
+            <p className="mt-6 text-base sm:text-lg text-gray-400 max-w-2xl leading-relaxed">Tokenized stock baskets (xStocks) with an autonomous agent that finds pricing gaps and executes spot swaps on BSC Mainnet via the Binance Web3 API.</p>
             <div className="mt-8 flex flex-wrap gap-3">
               <a href="#baskets" className="inline-flex items-center gap-2 rounded-lg bg-[#F0B90B] px-5 py-3 text-sm font-bold text-black hover:bg-[#ffd447] transition-colors">Explore baskets <ArrowUpRight className="w-4 h-4" /></a>
               <button onClick={() => showToast('Agent Studio connected: #8004-EQUIPULSE')} className="inline-flex items-center gap-2 rounded-lg border border-white/15 px-5 py-3 text-sm font-bold text-white hover:border-[#F0B90B]/50 transition-colors"><Bot className="w-4 h-4 text-[#F0B90B]" /> Meet the agent</button>
